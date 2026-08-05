@@ -25,7 +25,7 @@ Collective, built on OSM data with a Leaflet routing UI and fare reference page.
 
 ## 3. DOTM (Department of Transport Management) records
 **Source:** Nepal DOTM operator/route registration records.
-**Method:** [manual transcription / public dataset / office records — confirm which]
+**Method:** manual transcription / public dataset 
 **Files:**
 - `operators.csv` — registered transport operator/company details
 - `route_operators_production.csv` — operator-to-route assignments
