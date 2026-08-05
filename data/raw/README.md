@@ -30,12 +30,6 @@ Collective, built on OSM data with a Leaflet routing UI and fare reference page.
 - `operators.csv` — registered transport operator/company details
 - `route_operators_production.csv` — operator-to-route assignments
 
-## 4. ESCAP 2025 Fare and Route Review study
-**Source:** *ESCAP 2025 RP Study on Fare and Route Review of Public Transport in
-Kathmandu* (PDF, on file).
-**Method:** figures and fare bands transcribed from the report.
-**Files:**
-- `fare_rules.csv` — fare structure by distance/vehicle type
 
 ## Notes
 - Files above are the pre-cleaning originals. See `../processed/report.md` for
