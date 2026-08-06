@@ -1,6 +1,4 @@
 # Data
-
-**Owner:** Dipesh S Saud — Scrum tasks 1–8
 (schema, ingestion, cleaning, spatial queries, data access layer)
 
 ```
@@ -10,71 +8,64 @@ data/
 │                   - Overpass Turbo pulls
 │                   - DOTM records
 │
-├── processed/    Cleaned, deduplicated, validated CSVs ready for DB import
+├── processed/    Cleaned, validated CSVs ready for DB import
 │                   (see processed/README.md)
 │
-└── scripts/      ETL scripts
-                    - dedup (~30m threshold)
-                    - coordinate validation
-                    - name normalization
+└── scripts/      Data-cleaning and validation pipeline
+                    - clean_data.py    — raw/ → processed/
+                    - validate_clean.py — post-cleaning integrity checks
+                    - test_clean_data.py — unit tests
+                    - requirements.txt
 ```
 
-`schema.sql` and `import.sql` at the top of `data/` build the full schema
-(including `fare_rules`, added this round) and load everything in
-`processed/`.
+`## Pipeline order
 
-> **This is the confirmed single source of truth.**
-> The earlier duplicate at `backend/app/db/schema.sql` was a stale,
-> unmaintained mirror of an older/unrelated Alembic scaffold
-> (`0001_initial_schema` — integer PKs, no `operators` / `fare_rules` /
-> `route_operators` tables) and has been deleted. The live app database is
-> migrated via Alembic revision `0002_replace_with_full_schema`, which
-> replicates `data/schema.sql` table-for-table and has been applied and
-> verified against a live instance.
+1. **`scripts/clean_data.py`** — `raw/` → `processed/`
+   Turns raw exports into validated CSVs and regenerates
+   `processed/report.md` documenting exactly what changed:
+     1. Removes `route_stops` rows referencing a `stop_id` with no matching
+        row in `stops`
+     2. Re-sequences `route_stops.sequence_no` per route after removals
+        (1..N)
+     3. Recomputes `routes.start_stop_id` / `end_stop_id` / `total_stops`
+        from `route_stops`
+     4. Nulls out `routes.operator_id` where it has no match in `operators`
+        and isn't recoverable from `operator_id_raw` or `route_operators`
+     5. Flags distance outliers (haversine vs. recorded
+        `approx_distance_km`)
+     6. Verifies `route_operators`/`operators` have no orphan pairs
+     7. Runs the same post-cleanup integrity checks `import.sql` runs in
+        Postgres
 
----
+```bash
+   python scripts/clean_data.py \
+       --raw-dir data/raw \
+       --out-dir data/processed \
+       --config scripts/config.yaml   # optional
+```
 
-## Pipeline order
+2. **`scripts/validate_clean.py`** — integrity checks on `processed/*.csv`,
+   no database required. Runs the same checks as the sanity-check block at
+   the bottom of `import.sql`, so problems can be caught in CI before ever
+   touching Postgres.
 
-1. **`raw/` → `processed/`**
-   Original exports (2013 Yatayat OSM export, Overpass Turbo pulls, DOTM
-   records) cleaned, deduplicated (~30m stop-merge threshold),
-   coordinate-validated, and name-normalized into `processed/*_clean.csv`.
-   See `processed/README.md` for the full cleaning methodology and
-   `report_v4.md` for the audit trail.
+```bash
+   python scripts/validate_clean.py --dir data/processed
+   # exits 1 and prints failures if any check is non-zero
+```
 
-2. **`schema.sql`**
-   Builds the full schema — 7 tables:
-     - `operators`
-     - `stops`
-     - `routes`
-     - `route_stops`
-     - `route_operators`
-     - `route_return_leg_priority`
-     - `fare_rules`
+3. **`schema.sql`** — builds the full schema (7 tables: `operators`,
+   `stops`, `routes`, `route_stops`, `route_operators`,
+   `route_return_leg_priority`, `fare_rules`) against a PostgreSQL 16.14 +
+   PostGIS 3.4.2 instance. Applied via Alembic migration
+   `0002_replace_with_full_schema` in the backend's migration chain, so the
+   live app DB and this file stay in sync going forward.
 
-   Target: PostgreSQL 16.14 + PostGIS 3.4.2.
-   Applied via Alembic migration `0002_replace_with_full_schema` in the
-   backend's migration chain, so the live app DB and this file stay in
-   sync going forward.
-
-3. **`import.sql`**
-   Loads all `processed/*_clean.csv` files directly via `\copy` into the
-   schema from step 2, in dependency order:
-
-   ```
-   operators
-     └─ stops
-          └─ routes
-               ├─ route_stops
-               ├─ route_operators
-               └─ route_return_leg_priority
-   fare_rules   (independent — no FK dependencies)
-   ```
-
-   Followed by a built-in referential-integrity sanity check (orphan FKs,
-   `total_stops` consistency, missing `geom`) — all currently passing
-   clean.
+4. **`import.sql`** — loads all `processed/*_clean.csv` files directly via
+   `\copy` into the schema from step 3, in dependency order (operators →
+   stops → routes → route_stops → route_operators →
+   route_return_leg_priority → fare_rules), followed by a built-in
+   referential-integrity sanity check — all currently passing clean.
 
    > **Before running:** paths inside `import.sql` are placeholders
    > (`/path/to/csv/`). Replace with your local absolute path to
