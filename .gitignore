@@ -31,7 +31,11 @@ yarn-error.log*
 
 # --- Data (keep processed/small files, ignore huge raw exports if needed) ---
 data/raw/*.osm
+!data/raw/overpass_export_2026-07-11_1331.osm
+!data/raw/overpass_export_2026-07-11_1335.osm
+!data/raw/yatayat_export.osm
 data/raw/*.pbf
 
 # --- Docker ---
 *.log
+!data/raw/yatayat_export.osm
