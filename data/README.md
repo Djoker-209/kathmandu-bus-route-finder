@@ -18,7 +18,7 @@ data/
                     - requirements.txt
 ```
 
-`## Pipeline order
+## Pipeline order
 
 1. **`scripts/clean_data.py`** — `raw/` → `processed/`
    Turns raw exports into validated CSVs and regenerates
@@ -117,3 +117,4 @@ the `EXCLUDE USING gist` constraint) and correctly computed as
 
   Source listed `operator = "Local Microbus"` — an informal placeholder
   with no registered match.
+
