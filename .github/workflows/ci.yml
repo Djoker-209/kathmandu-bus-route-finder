@@ -52,3 +52,10 @@ jobs:
           else
             echo "Frontend not yet scaffolded — skipping."
           fi
+
+- run: pytest
+        env:
+          # Settings.admin_api_key has no default (app/core/config.py) --
+          # fails loudly if unset in any environment, CI included. This is
+          # a throwaway CI-only value, not a real secret.
+          ADMIN_API_KEY: ci-test-admin-key

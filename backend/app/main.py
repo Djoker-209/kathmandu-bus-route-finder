@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import routes, routing, stops
+from app.api import admin, routes, routing, stops
 from app.db.session import SessionLocal
 from app.routing import graph_builder
 
@@ -12,7 +12,6 @@ logger = logging.getLogger("uvicorn.error")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Warm the graph cache at startup instead of on the first request.
     db = SessionLocal()
     try:
         graph = graph_builder.get_cached_graph(db)
@@ -42,16 +41,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/admin/rebuild-graph")
-def rebuild_graph():
-    db = SessionLocal()
-    try:
-        graph = graph_builder.get_cached_graph(db, refresh=True)
-        return {"status": "ok", "stops": graph.number_of_nodes(), "edges": graph.number_of_edges()}
-    finally:
-        db.close()
-
-
 app.include_router(stops.router)
 app.include_router(routes.router)
 app.include_router(routing.router)
+app.include_router(admin.router)
