@@ -31,10 +31,19 @@ pip install -r requirements.txt
 # 4. Apply migrations (creates stops / routes / route_stops / etc.)
 alembic upgrade head
 
-# 5. Run the API
+# 5. (Optional) Start OSRM for road-network route geometry
+# Without this, /route-finder still works correctly — it just returns
+# road_geometry: null on every leg, and the frontend falls back to
+# straight-line segments between stops.
+wget http://download.geofabrik.de/asia/nepal-latest.osm.pbf
+docker run -t -v "${PWD}:/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/nepal-latest.osm.pbf
+docker run -t -v "${PWD}:/data" osrm/osrm-backend osrm-partition /data/nepal-latest.osrm
+docker run -t -v "${PWD}:/data" osrm/osrm-backend osrm-customize /data/nepal-latest.osrm
+docker run -d --name osrm_ktm -p 5000:5000 -v "${PWD}:/data" osrm/osrm-backend osrm-routed --algorithm mld /data/nepal-latest.osrm
+
+# 6. Run the API
 uvicorn app.main:app --reload
 ```
-
 Backend runs at `http://localhost:8000` (interactive docs at `/docs`).
 
 ## Running tests

@@ -53,15 +53,20 @@ class RouteStopOut(BaseModel):
     sequence_no: int
     stop: StopOut
 
+class StopListOut(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[StopOut]
 
 class RouteLeg(BaseModel):
     """One uninterrupted ride on a single route, part of a route-finder result."""
-
     route_id: str
     route_name: str
     board_stop: StopOut
     alight_stop: StopOut
     num_stops: int
+    road_geometry: Optional[dict] = None
 
 
 class RouteFinderResult(BaseModel):

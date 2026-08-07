@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+
 from app.db.session import get_db
 from app.db import queries
 from app.schemas import RouteOut, RouteStopOut
