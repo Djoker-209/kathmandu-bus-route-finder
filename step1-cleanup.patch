@@ -1,0 +1,1087 @@
+diff --git a/backend/app/api/admin.py b/backend/app/api/admin.py
+deleted file mode 100644
+index aafe016..0000000
+--- a/backend/app/api/admin.py
++++ /dev/null
+@@ -1,96 +0,0 @@
+-"""Write endpoints for populating the network (data entry / ETL use).
+-
+-Every route here is behind `require_admin_key` -- there's no per-user
+-auth in this project, just a shared secret for the small team doing
+-data entry. See app/core/security.py.
+-"""
+-
+-from geoalchemy2.elements import WKTElement
+-from geoalchemy2.shape import to_shape
+-from sqlalchemy.exc import IntegrityError
+-from sqlalchemy.orm import Session
+-from fastapi import APIRouter, Depends, HTTPException, status
+-
+-from app.core.security import require_admin_key
+-from app.db.graph_loader import reload_graph
+-from app.db.session import get_db
+-from app.models import Route as RouteORM
+-from app.models import RouteStop as RouteStopORM
+-from app.models import Stop as StopORM
+-
+-from .schemas import RouteCreate, RouteOut, RouteStopCreate, StopCreate, StopOut
+-
+-router = APIRouter(dependencies=[Depends(require_admin_key)])
+-
+-
+-@router.post("/stops", response_model=StopOut, status_code=status.HTTP_201_CREATED)
+-def create_stop(payload: StopCreate, db: Session = Depends(get_db)) -> StopOut:
+-    row = StopORM(
+-        name=payload.name,
+-        name_normalized=payload.name.strip().lower(),
+-        is_interchange=payload.is_interchange,
+-        verified=payload.verified,
+-        geom=WKTElement(f"POINT({payload.lng} {payload.lat})", srid=4326),
+-    )
+-    db.add(row)
+-    db.commit()
+-    db.refresh(row)
+-
+-    point = to_shape(row.geom)
+-    return StopOut(
+-        stop_id=row.stop_id,
+-        name=row.name,
+-        lat=point.y,
+-        lng=point.x,
+-        is_interchange=row.is_interchange,
+-        verified=row.verified,
+-    )
+-
+-
+-@router.post("/routes", response_model=RouteOut, status_code=status.HTTP_201_CREATED)
+-def create_route(payload: RouteCreate, db: Session = Depends(get_db)) -> RouteOut:
+-    row = RouteORM(
+-        route_number=payload.route_number,
+-        route_name=payload.route_name,
+-        operator=payload.operator,
+-        tier=payload.tier,
+-        source=payload.source,
+-        verified=payload.verified,
+-    )
+-    db.add(row)
+-    db.commit()
+-    db.refresh(row)
+-    return RouteOut.model_validate(row)
+-
+-
+-@router.post("/routes/{route_id}/stops", status_code=status.HTTP_201_CREATED)
+-def add_route_stop(route_id: int, payload: RouteStopCreate, db: Session = Depends(get_db)) -> dict:
+-    if db.get(RouteORM, route_id) is None:
+-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Route {route_id} not found.")
+-    if db.get(StopORM, payload.stop_id) is None:
+-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Stop {payload.stop_id} not found.")
+-
+-    row = RouteStopORM(route_id=route_id, stop_id=payload.stop_id, sequence_order=payload.sequence_order)
+-    db.add(row)
+-    try:
+-        db.commit()
+-    except IntegrityError as exc:
+-        db.rollback()
+-        raise HTTPException(
+-            status_code=status.HTTP_409_CONFLICT,
+-            detail=f"Route {route_id} already has a stop at sequence_order {payload.sequence_order}.",
+-        ) from exc
+-
+-    return {"route_id": route_id, "stop_id": payload.stop_id, "sequence_order": payload.sequence_order}
+-
+-
+-@router.post("/graph/reload", status_code=status.HTTP_200_OK)
+-def reload_graph_cache(db: Session = Depends(get_db)) -> dict:
+-    """Rebuild the in-memory routing graph from the current DB state.
+-
+-    Call this after adding stops/routes/route_stops -- the graph is
+-    cached (see app/db/graph_loader.py) so writes don't show up in
+-    /api/route/find until this runs.
+-    """
+-    graph = reload_graph(db)
+-    return {"nodes": graph.number_of_nodes(), "edges": graph.number_of_edges()}
+diff --git a/backend/app/api/route_finder.py b/backend/app/api/route_finder.py
+deleted file mode 100644
+index 5a83705..0000000
+--- a/backend/app/api/route_finder.py
++++ /dev/null
+@@ -1,50 +0,0 @@
+-"""
+-api/route_finder.py
+-
+-GET /route-finder — shortest path (direct or single/multi-transfer)
+-between two stop_ids, built on the NetworkX graph in app/routing/.
+-"""
+-
+-from fastapi import APIRouter, Depends, HTTPException, Query
+-from sqlalchemy.orm import Session
+-
+-from app.db import queries
+-from app.db.session import get_db
+-from app.routing.pathfinder import NoRouteFoundError, find_shortest_path
+-from app.schemas import RouteFinderResponse, RouteFinderSegmentOut
+-
+-router = APIRouter(tags=["route-finder"])
+-
+-
+-@router.get("/route-finder", response_model=RouteFinderResponse)
+-def route_finder(
+-    origin_stop_id: str = Query(..., description="stop_id of the origin, e.g. S0198"),
+-    destination_stop_id: str = Query(..., description="stop_id of the destination, e.g. S0021"),
+-    db: Session = Depends(get_db),
+-):
+-    try:
+-        result = find_shortest_path(db, origin_stop_id, destination_stop_id)
+-    except NoRouteFoundError as exc:
+-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+-
+-    stops_by_id = {sid: queries.get_stop(db, sid) for sid in result.stop_sequence}
+-
+-    segments_out = [
+-        RouteFinderSegmentOut(
+-            route_id=seg.route_id,
+-            is_transfer=seg.is_transfer,
+-            distance_m=round(seg.distance_m, 1),
+-            from_stop=stops_by_id[seg.from_stop_id],
+-            to_stop=stops_by_id[seg.to_stop_id],
+-        )
+-        for seg in result.segments
+-    ]
+-
+-    return RouteFinderResponse(
+-        origin_stop_id=origin_stop_id,
+-        destination_stop_id=destination_stop_id,
+-        total_distance_m=round(result.total_distance_m, 1),
+-        transfer_count=result.transfer_count,
+-        stop_sequence=result.stop_sequence,
+-        segments=segments_out,
+-    )
+\ No newline at end of file
+diff --git a/backend/app/api/schemas.py b/backend/app/api/schemas.py
+deleted file mode 100644
+index 97a0b2b..0000000
+--- a/backend/app/api/schemas.py
++++ /dev/null
+@@ -1,95 +0,0 @@
+-"""Pydantic schemas for request/response bodies.
+-
+-Kept separate from the ORM models (app/models) on purpose: the DB
+-shape (geom column, server-managed timestamps, etc.) shouldn't leak
+-into the API contract, and the API contract shouldn't constrain how
+-the DB stores things.
+-"""
+-
+-from pydantic import BaseModel, Field, field_validator
+-
+-
+-# ---------------------------------------------------------------------------
+-# Stops
+-# ---------------------------------------------------------------------------
+-
+-class StopOut(BaseModel):
+-    stop_id: int
+-    name: str
+-    lat: float
+-    lng: float
+-    is_interchange: bool
+-    verified: bool
+-
+-    model_config = {"from_attributes": True}
+-
+-
+-class StopCreate(BaseModel):
+-    name: str = Field(min_length=1, max_length=150)
+-    lat: float = Field(ge=-90, le=90)
+-    lng: float = Field(ge=-180, le=180)
+-    is_interchange: bool = False
+-    verified: bool = False
+-
+-    @field_validator("name")
+-    @classmethod
+-    def strip_name(cls, v: str) -> str:
+-        v = v.strip()
+-        if not v:
+-            raise ValueError("name must not be blank")
+-        return v
+-
+-
+-# ---------------------------------------------------------------------------
+-# Routes
+-# ---------------------------------------------------------------------------
+-
+-class RouteOut(BaseModel):
+-    route_id: int
+-    route_number: str
+-    route_name: str
+-    operator: str | None = None
+-    tier: int | None = None
+-    verified: bool
+-
+-    model_config = {"from_attributes": True}
+-
+-
+-class RouteCreate(BaseModel):
+-    route_number: str = Field(min_length=1, max_length=20)
+-    route_name: str = Field(min_length=1, max_length=150)
+-    operator: str | None = Field(default=None, max_length=100)
+-    tier: int | None = Field(default=None, ge=1, le=3)
+-    source: str | None = Field(default=None, max_length=50)
+-    verified: bool = False
+-
+-
+-class RouteStopCreate(BaseModel):
+-    stop_id: int
+-    sequence_order: int = Field(ge=1)
+-
+-
+-# ---------------------------------------------------------------------------
+-# Route search (the actual "find me a bus" endpoint)
+-# ---------------------------------------------------------------------------
+-
+-class RouteLeg(BaseModel):
+-    """One uninterrupted ride on a single bus route, or a walking
+-    transfer between two nearby stops on different routes.
+-    """
+-    kind: str  # "ride" | "transfer"
+-    route_id: int | None = None
+-    route_number: str | None = None
+-    route_name: str | None = None
+-    stops: list[StopOut]
+-    distance_m: float
+-
+-
+-class RouteSearchResult(BaseModel):
+-    origin: StopOut
+-    destination: StopOut
+-    is_transfer: bool
+-    transfer_stop: StopOut | None = None
+-    total_distance_m: float
+-    legs: list[RouteLeg]
+-    path: list[StopOut]
+diff --git a/backend/app/db/graph_loader.py b/backend/app/db/graph_loader.py
+deleted file mode 100644
+index 74934b0..0000000
+--- a/backend/app/db/graph_loader.py
++++ /dev/null
+@@ -1,72 +0,0 @@
+-"""Loads stops/route_stops from Postgres and hands them to the
+-(database-agnostic) graph_engine to build a NetworkX graph.
+-
+-The graph is expensive to rebuild (O(stops^2) for the transfer-edge
+-pass) relative to a single route lookup, so we build it once and cache
+-it in memory. Call `reload_graph()` after admin writes (new stop,
+-new route, etc.) to invalidate the cache -- see api/admin.py.
+-
+-Column mapping note: the production schema (migration 0002) has Text
+-IDs and columns named `stop_name` / `sequence_no`, not the `Integer`
+-IDs and `name` / `sequence_order` columns this loader originally
+-targeted (that was the 0001 scaffold schema). graph_engine's own
+-dataclass field names (`name`, `sequence_order`) are unchanged -- only
+-the DB column names being read here changed. Also: the production
+-`stops` table has explicit `lat`/`lng` float columns, so there's no
+-need to parse them back out of `geom` via shapely anymore.
+-"""
+-
+-import threading
+-
+-import networkx as nx
+-from sqlalchemy.orm import Session
+-
+-from app.graph_engine import build_graph
+-from app.graph_engine.models import RouteStop as GraphRouteStop
+-from app.graph_engine.models import Stop as GraphStop
+-from app.models import RouteStop as RouteStopORM
+-from app.models import Stop as StopORM
+-
+-_lock = threading.Lock()
+-_cached_graph: nx.DiGraph | None = None
+-
+-
+-def _load_stops(db: Session) -> list[GraphStop]:
+-    return [
+-        GraphStop(stop_id=row.stop_id, name=row.stop_name, lat=row.lat, lng=row.lng)
+-        for row in db.query(StopORM).filter(StopORM.status == "active").all()
+-    ]
+-
+-
+-def _load_route_stops(db: Session) -> list[GraphRouteStop]:
+-    return [
+-        GraphRouteStop(route_id=row.route_id, stop_id=row.stop_id, sequence_order=row.sequence_no)
+-        for row in db.query(RouteStopORM).all()
+-    ]
+-
+-
+-def build_graph_from_db(db: Session) -> nx.DiGraph:
+-    """Build a fresh graph straight from the database, bypassing the cache."""
+-    stops = _load_stops(db)
+-    route_stops = _load_route_stops(db)
+-    return build_graph(stops, route_stops)
+-
+-
+-def get_graph(db: Session) -> nx.DiGraph:
+-    """Return the cached graph, building it on first use."""
+-    global _cached_graph
+-    if _cached_graph is None:
+-        with _lock:
+-            if _cached_graph is None:  # re-check after acquiring the lock
+-                _cached_graph = build_graph_from_db(db)
+-    return _cached_graph
+-
+-
+-def reload_graph(db: Session) -> nx.DiGraph:
+-    """Force a rebuild of the cached graph. Call this after any write
+-    to stops/routes/route_stops so route lookups see the new data.
+-    """
+-    global _cached_graph
+-    with _lock:
+-        _cached_graph = build_graph_from_db(db)
+-    return _cached_graph
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/__init__.py b/backend/app/graph_engine/__init__.py
+deleted file mode 100644
+index b7bc4db..0000000
+--- a/backend/app/graph_engine/__init__.py
++++ /dev/null
+@@ -1,6 +0,0 @@
+-"""graph_engine public API."""
+-
+-from .graph_builder import build_graph
+-from .route_finder import RouteFinder
+-
+-__all__ = ["build_graph", "RouteFinder"]
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/constants.py b/backend/app/graph_engine/constants.py
+deleted file mode 100644
+index 1b5ba71..0000000
+--- a/backend/app/graph_engine/constants.py
++++ /dev/null
+@@ -1,5 +0,0 @@
+-"""Small set of tunable constants (meters)."""
+-
+-EARTH_RADIUS: int = 6_371_000
+-INTERCHANGE_DISTANCE: int = 100
+-TRANSFER_PENALTY: int = 900
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/graph_builder.py b/backend/app/graph_engine/graph_builder.py
+deleted file mode 100644
+index 9ab698a..0000000
+--- a/backend/app/graph_engine/graph_builder.py
++++ /dev/null
+@@ -1,106 +0,0 @@
+-"""Graph construction utilities.
+-
+-This module builds a single directed, weighted graph representing the
+-city bus network. Node IDs are `stop_id` values. Two edge kinds are
+-present:
+-
+-- "route": connects consecutive stops on the same route; weight is
+-  the geographic distance in metres.
+-- "transfer": connects geographically close stops from different
+-  routes and has an added transfer penalty to reflect walking + wait
+-  overhead.
+-"""
+-
+-from collections import defaultdict
+-from itertools import combinations
+-from typing import Dict, Iterable
+-
+-import networkx as nx
+-
+-from .models import RouteStop, Stop
+-from .utils import haversine_distance
+-from .constants import TRANSFER_PENALTY, INTERCHANGE_DISTANCE
+-
+-
+-# Edge type markers stored on graph edges
+-EDGE_TYPE_ROUTE = "route"
+-EDGE_TYPE_TRANSFER = "transfer"
+-
+-
+-def build_graph(stops: Iterable[Stop], route_stops: Iterable[RouteStop]) -> nx.DiGraph:
+-    """Construct and return a directed NetworkX graph for the network.
+-
+-    Args:
+-        stops: iterable of `Stop` objects describing known stops.
+-        route_stops: iterable of `RouteStop` objects describing which
+-            stops belong to which route and their sequence.
+-
+-    Returns:
+-        A `networkx.DiGraph` where node IDs are `stop_id` and edges
+-        have attributes `weight`, `edge_type` and optionally `route_id`.
+-    """
+-
+-    graph = nx.DiGraph()
+-
+-    stops_by_id: Dict[int, Stop] = {s.stop_id: s for s in stops}
+-    for stop in stops:
+-        graph.add_node(stop.stop_id, name=stop.name, lat=stop.lat, lng=stop.lng)
+-
+-    _add_route_edges(graph, stops_by_id, list(route_stops))
+-    _add_transfer_edges(graph, stops_by_id, list(route_stops))
+-
+-    return graph
+-
+-
+-def _add_route_edges(graph: nx.DiGraph, stops_by_id: Dict[int, Stop], route_stops: list[RouteStop]) -> None:
+-    """Connect consecutive stops within each route in both directions.
+-
+-    The graph treats routes as bidirectional by default. If your source
+-    data contained directionality, adjust this function accordingly.
+-    """
+-    by_route: dict[int, list[RouteStop]] = defaultdict(list)
+-    for rs in route_stops:
+-        by_route[rs.route_id].append(rs)
+-
+-    for route_id, stops_in_route in by_route.items():
+-        stops_in_route.sort(key=lambda rs: rs.sequence_order)
+-        for a, b in zip(stops_in_route, stops_in_route[1:]):
+-            # Ignore incomplete references (defensive programming)
+-            if a.stop_id not in stops_by_id or b.stop_id not in stops_by_id:
+-                continue
+-
+-            stop_a, stop_b = stops_by_id[a.stop_id], stops_by_id[b.stop_id]
+-            dist = haversine_distance(stop_a.lat, stop_a.lng, stop_b.lat, stop_b.lng)
+-            graph.add_edge(a.stop_id, b.stop_id, weight=dist, edge_type=EDGE_TYPE_ROUTE, route_id=route_id)
+-            graph.add_edge(b.stop_id, a.stop_id, weight=dist, edge_type=EDGE_TYPE_ROUTE, route_id=route_id)
+-
+-
+-def _add_transfer_edges(graph: nx.DiGraph, stops_by_id: Dict[int, Stop], route_stops: list[RouteStop]) -> None:
+-    """Add transfer edges between geographically close stops on
+-    different routes.
+-
+-    A transfer edge's weight is the geographic distance plus a fixed
+-    penalty to approximate walk + wait time.
+-    """
+-    stop_to_routes: dict[int, set[int]] = defaultdict(set)
+-    for rs in route_stops:
+-        stop_to_routes[rs.stop_id].add(rs.route_id)
+-
+-    stop_ids = list(stop_to_routes.keys())
+-    for id_a, id_b in combinations(stop_ids, 2):
+-        # Skip if they already share a route -- then no transfer is needed.
+-        if stop_to_routes[id_a] & stop_to_routes[id_b]:
+-            continue
+-
+-        # Defensive: ensure both stops exist in the provided stop list.
+-        if id_a not in stops_by_id or id_b not in stops_by_id:
+-            continue
+-
+-        stop_a, stop_b = stops_by_id[id_a], stops_by_id[id_b]
+-        dist = haversine_distance(stop_a.lat, stop_a.lng, stop_b.lat, stop_b.lng)
+-
+-        if dist <= INTERCHANGE_DISTANCE:
+-            weight = dist + TRANSFER_PENALTY
+-            graph.add_edge(id_a, id_b, weight=weight, edge_type=EDGE_TYPE_TRANSFER)
+-            graph.add_edge(id_b, id_a, weight=weight, edge_type=EDGE_TYPE_TRANSFER)
+-
+diff --git a/backend/app/graph_engine/models.py b/backend/app/graph_engine/models.py
+deleted file mode 100644
+index 9366051..0000000
+--- a/backend/app/graph_engine/models.py
++++ /dev/null
+@@ -1,30 +0,0 @@
+-"""
+-Data shapes used by the graph engine.
+-
+-stop_id / route_id are typed `str` here because the production schema
+-(migrations/versions/0002_replace_with_full_schema.py) uses Text primary
+-keys ("S0198", "R042", etc.), not autoincrement integers. Field NAMES
+-(`name`, `sequence_order`) are kept as-is even though the DB columns are
+-now `stop_name` / `sequence_no` — this dataclass is graph_engine's own
+-internal shape, not a DB mirror, so renaming isn't required, and keeping
+-it unchanged means the existing test suite doesn't need to change.
+-The mapping from DB column name to this field name happens in
+-db/graph_loader.py, not here.
+-"""
+-
+-from dataclasses import dataclass
+-
+-
+-@dataclass(frozen=True)
+-class Stop:
+-    stop_id: str
+-    name: str
+-    lat: float
+-    lng: float
+-
+-
+-@dataclass(frozen=True)
+-class RouteStop:
+-    route_id: str
+-    stop_id: str
+-    sequence_order: int
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/requirements.txt b/backend/app/graph_engine/requirements.txt
+deleted file mode 100644
+index ca02d89061fddb36f920cf42b28fcc0c662a046c..0000000000000000000000000000000000000000
+GIT binary patch
+literal 0
+HcmV?d00001
+
+literal 2054
+zcmZvd&2rN~5QO(k6^~*HJ9ZKd9Jq6U;sIQa{1b&(7P6egJUr0fwAQNtrP`FE?dj?H
+z)$d=c)aW^+KCN^%X`LoIhg7AHdfumZaTe)qdLzWY*gl<8E4$+be;YO#e@?a7;F|0G
+zH2%&8wxc}uy8SNuW?;A)JQ`D_t)4pUXJL;XxGUK`>U2`I*U4(}a(zMUb(e3jzZ!13
+zP>t_hFtq7jZ$K_CG272t+V0XxxOPBH#Y2oUMS~I$s6h#g-N1u4A_fCutq6<GY5EWx
+zzI_SAN%pleu?q(DI%Y6i*^;l7bT}W>hJ2#OUWjF*r%`4$!V(V}7CQ6LQA<TLsIa=*
+z;e8`kqG%%DMS<&qf;uultvaDL@&W&ixc|oV$|g+Q6Xi4%IG<+8h-Gl@R3%jRif|d)
+z$wxPIgyYLGKImpW%D`->7YZNb^{9LNV&(4j%_%(5;hlU`@>1(JK0#AYEB!y3s+yNv
+z79^e5i<wUBgY!=FLk;04OR%HE)r6h5RB{p(J?sBU*n<#RH#v3xgYDC^ZaYoMOCZSh
+zwT^4vilx%sN?kMV9T4UKK`uRoXd&90s5^H@J*d5V<=_26WJI_P1^dW+u8Zf{c_uEf
+z%*k#vC#Z1UTWL6`&aK#%ItM+E(p~E}al41;RnKTERi1~^XC;TN?x@I8=Sd2U$$8EU
+z=ZLORrg9a~lOsDTZ#g$~MN#2s&We_e$4q(~dKyt$IL4TXG*hoU#omdwB3rp0ubJt_
+z(qEwGQD6J`qHK=m1C`E0>25X?olRG9@BS<u!mTHg-R?a<&Mkb{z}QL)Jh^JGZRv8R
+z<|+J8duz!VD}KhaNXD3(!ueC3@FO^8u|Y}~(Ouq>WUNfuQB`pNgPn$z`M#yE>2vy|
+z9;g)MM$F#iC?lf9Fe%=i%u3Ee*~avRyT+(aY_4S4CPd+x^Ok3i@}(r>*b||rs#iCy
+zqO;B7KH%P)FthOG^vrr^9Q8k63i>DSPa-J2<FBo4=>3<W9%Kg#d-7zK*?Sh}vk+^c
+M??W%F{)SPxKYzY2egFUf
+
+diff --git a/backend/app/graph_engine/route_finder.py b/backend/app/graph_engine/route_finder.py
+deleted file mode 100644
+index 2b1a521..0000000
+--- a/backend/app/graph_engine/route_finder.py
++++ /dev/null
+@@ -1,55 +0,0 @@
+-"""Shortest-path helpers for the transport graph."""
+-
+-from dataclasses import dataclass
+-from typing import List, Optional
+-
+-import networkx as nx
+-
+-
+-class NoRouteFoundError(Exception):
+-    pass
+-
+-
+-@dataclass
+-class RouteResult:
+-    stop_ids: List[int]
+-    total_weight: float
+-    is_transfer: bool
+-    transfer_stop_id: Optional[int]
+-
+-
+-class RouteFinder:
+-    def __init__(self, graph: nx.DiGraph):
+-        self.graph = graph
+-
+-    def find_route(self, source_stop_id: int, dest_stop_id: int) -> RouteResult:
+-        self._validate_nodes(source_stop_id, dest_stop_id)
+-        try:
+-            path = nx.dijkstra_path(self.graph, source_stop_id, dest_stop_id, weight="weight")
+-            total_weight = nx.dijkstra_path_length(self.graph, source_stop_id, dest_stop_id, weight="weight")
+-        except nx.NetworkXNoPath as exc:
+-            raise NoRouteFoundError(f"No route between {source_stop_id} and {dest_stop_id}") from exc
+-        transfer_stop_id = self._first_transfer_edge_target(path)
+-        return RouteResult(stop_ids=path, total_weight=total_weight, is_transfer=transfer_stop_id is not None, transfer_stop_id=transfer_stop_id)
+-
+-    def find_route_bfs(self, source_stop_id: int, dest_stop_id: int) -> RouteResult:
+-        self._validate_nodes(source_stop_id, dest_stop_id)
+-        try:
+-            path = nx.shortest_path(self.graph, source_stop_id, dest_stop_id)
+-        except nx.NetworkXNoPath as exc:
+-            raise NoRouteFoundError(f"No route between {source_stop_id} and {dest_stop_id}") from exc
+-        return RouteResult(stop_ids=path, total_weight=float(len(path) - 1), is_transfer=False, transfer_stop_id=None)
+-
+-    def _first_transfer_edge_target(self, path: List[int]) -> Optional[int]:
+-        for a, b in zip(path, path[1:]):
+-            if self.graph.edges[a, b].get("edge_type") == "transfer":
+-                return b
+-        return None
+-
+-    def _validate_nodes(self, source_stop_id: int, dest_stop_id: int) -> None:
+-        if source_stop_id == dest_stop_id:
+-            raise ValueError("Source and destination stops are identical.")
+-        if source_stop_id not in self.graph:
+-            raise NoRouteFoundError(f"Unknown source stop: {source_stop_id}")
+-        if dest_stop_id not in self.graph:
+-            raise NoRouteFoundError(f"Unknown destination stop: {dest_stop_id}")
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/sample_data.py b/backend/app/graph_engine/sample_data.py
+deleted file mode 100644
+index 7d159aa..0000000
+--- a/backend/app/graph_engine/sample_data.py
++++ /dev/null
+@@ -1,58 +0,0 @@
+-"""
+-sample_data.py
+-
+-A miniature Kathmandu network that stands in for the database until
+-BRF-6 (real data collection) is done. Coordinates below are verified
+-via web search against real-world sources, not guessed -- this matters
+-because a wrong coordinate silently produces a wrong distance, which
+-silently produces a wrong route.
+-
+-Network:
+-
+-  Route 1 "Ratnapark - Tripureshwor" (the example corridor):
+-      Ratnapark -> New Road -> Tripureshwor
+-
+-  Route 2 "Tripureshwor - Kalanki":
+-      Tripureshwor -> Kalanki
+-
+-  Tripureshwor is a real, well-known interchange point in Kathmandu
+-  (it sits on the Ring Road), so it's used here deliberately -- Route 1
+-  and Route 2 each have their OWN "Tripureshwor" stop row, about 40m
+-  apart, exactly like two different operators' independently-collected
+-  stop pins for the same real place. This is what tests whether the
+-  proximity-based interchange detection actually works, not just
+-  whether the code runs.
+-
+-  Budhanilkantha is included as a deliberately disconnected stop, for
+-  the "no route exists" edge case.
+-"""
+-"""Compact sample network for tests and demos."""
+-
+-from .models import RouteStop, Stop
+-
+-
+-STOPS = [
+-    # --- Route 1: Ratnapark -> New Road -> Tripureshwor ---
+-    Stop(1, "Ratnapark", 27.7075, 85.3155),
+-    Stop(2, "New Road", 27.7020, 85.3074),
+-    Stop(3, "Tripureshwor (Rt.1 stop)", 27.6953, 85.3130),
+-
+-    # --- Route 2: Tripureshwor -> Kalanki ---
+-    # Same real-world location as stop 3, ~40m away.
+-    Stop(4, "Tripureshwor (Rt.2 stop)", 27.6950, 85.3128),
+-    Stop(5, "Kalanki", 27.6939, 85.2803),  # approx, intermediate/endpoint
+-
+-    # --- Deliberately disconnected ---
+-    Stop(99, "Budhanilkantha", 27.7807, 85.3617),
+-]
+-
+-
+-ROUTE_STOPS = [
+-    RouteStop(route_id=1, stop_id=1, sequence_order=1),
+-    RouteStop(route_id=1, stop_id=2, sequence_order=2),
+-    RouteStop(route_id=1, stop_id=3, sequence_order=3),
+-
+-    RouteStop(route_id=2, stop_id=4, sequence_order=1),
+-    RouteStop(route_id=2, stop_id=5, sequence_order=2),
+-]
+-
+diff --git a/backend/app/graph_engine/tests/__init__.py b/backend/app/graph_engine/tests/__init__.py
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/backend/app/graph_engine/tests/test_graph_builder.py b/backend/app/graph_engine/tests/test_graph_builder.py
+deleted file mode 100644
+index c5fa317..0000000
+--- a/backend/app/graph_engine/tests/test_graph_builder.py
++++ /dev/null
+@@ -1,53 +0,0 @@
+-"""Tests for graph_builder.py — nodes, route edges, and transfer edges."""
+-from app.graph_engine.models import RouteStop, Stop
+-from app.graph_engine.graph_builder import build_graph
+-from app.graph_engine.constants import TRANSFER_PENALTY
+-
+-# Small hand-built network, independent of sample_data.py, so this
+-# test doesn't silently break if the sample data changes later.
+-STOPS = [
+-    Stop(1, "A", 27.700, 85.300),
+-    Stop(2, "B", 27.701, 85.301),
+-    Stop(3, "C", 27.702, 85.302),   # close to stop 4 -> interchange
+-    Stop(4, "D", 27.7021, 85.3021),  # ~50m from stop 3
+-]
+-ROUTE_STOPS = [
+-    RouteStop(route_id=1, stop_id=1, sequence_order=1),
+-    RouteStop(route_id=1, stop_id=2, sequence_order=2),
+-    RouteStop(route_id=1, stop_id=3, sequence_order=3),
+-    RouteStop(route_id=2, stop_id=4, sequence_order=1),
+-]
+-
+-
+-def test_all_stops_become_nodes():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    assert graph.number_of_nodes() == len(STOPS)
+-
+-
+-def test_route_edges_connect_consecutive_stops_both_directions():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    assert graph.has_edge(1, 2)
+-    assert graph.has_edge(2, 1)
+-    assert graph[1][2]["edge_type"] == "route"
+-
+-
+-def test_transfer_edge_created_between_nearby_different_route_stops():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    assert graph.has_edge(3, 4)
+-    assert graph[3][4]["edge_type"] == "transfer"
+-
+-
+-def test_transfer_edge_weight_includes_penalty():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    transfer_weight = graph[3][4]["weight"]
+-    # The transfer weight must be at least the penalty -- if it isn't,
+-    # the penalty isn't actually being applied.
+-    assert transfer_weight >= TRANSFER_PENALTY
+-
+-
+-def test_no_transfer_edge_between_same_route_stops():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    # stops 1 and 3 are on the same route -- no transfer edge needed
+-    # (they're already connected via route edges through stop 2)
+-    assert graph.get_edge_data(1, 3) is None
+-    
+diff --git a/backend/app/graph_engine/tests/test_graph_engine.py b/backend/app/graph_engine/tests/test_graph_engine.py
+deleted file mode 100644
+index 5151311..0000000
+--- a/backend/app/graph_engine/tests/test_graph_engine.py
++++ /dev/null
+@@ -1,57 +0,0 @@
+-"""End-to-end tests for the graph engine.
+-
+-These tests exercise the full pipeline: sample data -> graph builder ->
+-RouteFinder. They check direct and transfer routes, ensure edge weights
+-are sane, and validate node attributes expected by downstream code.
+-"""
+-import pytest
+-
+-from app.graph_engine import build_graph, RouteFinder
+-from app.graph_engine.sample_data import STOPS, ROUTE_STOPS
+-from app.graph_engine.route_finder import NoRouteFoundError
+-
+-
+-def test_full_engine_smoke():
+-	graph = build_graph(STOPS, ROUTE_STOPS)
+-	finder = RouteFinder(graph)
+-
+-	# Direct route: Ratnapark (1) -> Tripureshwor (3) via New Road (2)
+-	res = finder.find_route(1, 3)
+-	assert res.stop_ids == [1, 2, 3]
+-	assert res.is_transfer is False
+-
+-	# Transfer route: Ratnapark (1) -> Kalanki (5) via Tripureshwor
+-	res2 = finder.find_route(1, 5)
+-	assert res2.stop_ids[0] == 1
+-	assert res2.stop_ids[-1] == 5
+-	assert res2.is_transfer is True
+-	assert res2.transfer_stop_id == 4
+-
+-	# No route exists to isolated stop 99
+-	with pytest.raises(NoRouteFoundError):
+-		finder.find_route(1, 99)
+-
+-
+-def test_graph_sanity_checks():
+-	graph = build_graph(STOPS, ROUTE_STOPS)
+-
+-	# Nodes include lat/lng metadata
+-	for node, data in graph.nodes(data=True):
+-		assert "lat" in data and "lng" in data
+-
+-	# All edge weights are non-negative and transfer edges exist
+-	transfer_found = False
+-	for u, v, data in graph.edges(data=True):
+-		assert data.get("weight", 0) >= 0
+-		if data.get("edge_type") == "transfer":
+-			transfer_found = True
+-	assert transfer_found
+-
+-
+-def test_bfs_vs_dijkstra_on_direct_route():
+-	graph = build_graph(STOPS, ROUTE_STOPS)
+-	finder = RouteFinder(graph)
+-
+-	dij = finder.find_route(1, 3)
+-	bfs = finder.find_route_bfs(1, 3)
+-	assert dij.stop_ids == bfs.stop_ids
+diff --git a/backend/app/graph_engine/tests/test_integration.py b/backend/app/graph_engine/tests/test_integration.py
+deleted file mode 100644
+index e1d27e0..0000000
+--- a/backend/app/graph_engine/tests/test_integration.py
++++ /dev/null
+@@ -1,42 +0,0 @@
+-"""
+-Whole-workflow integration test: sample_data -> models -> graph_builder
+--> route_finder, exercised end to end exactly as the real API endpoint
+-will use it later (Phase 10). If this file passes, the entire graph
+-engine works together, not just in isolated pieces.
+-"""
+-from app.graph_engine import build_graph, RouteFinder
+-from app.graph_engine.sample_data import ROUTE_STOPS, STOPS
+-
+-
+-def test_full_pipeline_direct_route():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    finder = RouteFinder(graph)
+-
+-    result = finder.find_route(1, 3)  # Ratnapark -> Tripureshwor (Rt.1)
+-
+-    assert result.stop_ids == [1, 2, 3]
+-    assert result.is_transfer is False
+-    assert result.total_weight > 0
+-
+-
+-def test_full_pipeline_transfer_route():
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    finder = RouteFinder(graph)
+-
+-    result = finder.find_route(1, 5)  # Ratnapark -> Kalanki
+-
+-    assert result.stop_ids[0] == 1
+-    assert result.stop_ids[-1] == 5
+-    assert result.is_transfer is True
+-    assert result.transfer_stop_id == 4  # Tripureshwor (Rt.2 stop)
+-
+-
+-def test_full_pipeline_no_route_to_isolated_stop():
+-    from app.graph_engine.route_finder import NoRouteFoundError
+-    import pytest
+-
+-    graph = build_graph(STOPS, ROUTE_STOPS)
+-    finder = RouteFinder(graph)
+-
+-    with pytest.raises(NoRouteFoundError):
+-        finder.find_route(1, 99)  # Budhanilkantha, deliberately isolated
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/tests/test_models.py b/backend/app/graph_engine/tests/test_models.py
+deleted file mode 100644
+index c6ddbc1..0000000
+--- a/backend/app/graph_engine/tests/test_models.py
++++ /dev/null
+@@ -1,29 +0,0 @@
+-"""Tests for models.py — do the dataclasses hold and expose values correctly."""
+-from app.graph_engine.models import RouteStop, Stop
+-
+-
+-def test_stop_holds_values_correctly():
+-    s = Stop(1, "Ratnapark", 27.7075, 85.3155)
+-    assert s.stop_id == 1
+-    assert s.name == "Ratnapark"
+-    assert s.lat == 27.7075
+-    assert s.lng == 85.3155
+-
+-
+-def test_route_stop_holds_values_correctly():
+-    rs = RouteStop(route_id=1, stop_id=1, sequence_order=1)
+-    assert rs.route_id == 1
+-    assert rs.stop_id == 1
+-    assert rs.sequence_order == 1
+-
+-
+-def test_stop_is_immutable():
+-    """Stops are frozen dataclasses -- accidental mutation should fail
+-    loudly, not silently corrupt the graph later."""
+-    s = Stop(1, "Ratnapark", 27.7075, 85.3155)
+-    try:
+-        s.lat = 0.0
+-        assert False, "Stop should be immutable (frozen=True)"
+-    except AttributeError:
+-        pass
+-    
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/tests/test_route_finder.py b/backend/app/graph_engine/tests/test_route_finder.py
+deleted file mode 100644
+index 2107acb..0000000
+--- a/backend/app/graph_engine/tests/test_route_finder.py
++++ /dev/null
+@@ -1,55 +0,0 @@
+-"""Tests for route_finder.py — Dijkstra (primary) and BFS (comparator)."""
+-import pytest
+-
+-from app.graph_engine.graph_builder import build_graph
+-from app.graph_engine.models import RouteStop, Stop
+-from app.graph_engine.route_finder import NoRouteFoundError, RouteFinder
+-
+-STOPS = [
+-    Stop(1, "A", 27.700, 85.300),
+-    Stop(2, "B", 27.701, 85.301),
+-    Stop(3, "C", 27.702, 85.302),
+-    Stop(4, "D", 27.7021, 85.3021),  # interchange with C
+-    Stop(5, "E", 27.703, 85.303),
+-    Stop(99, "Isolated", 27.750, 85.350),
+-]
+-ROUTE_STOPS = [
+-    RouteStop(route_id=1, stop_id=1, sequence_order=1),
+-    RouteStop(route_id=1, stop_id=2, sequence_order=2),
+-    RouteStop(route_id=1, stop_id=3, sequence_order=3),
+-    RouteStop(route_id=2, stop_id=4, sequence_order=1),
+-    RouteStop(route_id=2, stop_id=5, sequence_order=2),
+-]
+-
+-
+-@pytest.fixture
+-def finder() -> RouteFinder:
+-    return RouteFinder(build_graph(STOPS, ROUTE_STOPS))
+-
+-
+-def test_direct_route(finder):
+-    result = finder.find_route(1, 3)
+-    assert result.stop_ids == [1, 2, 3]
+-    assert result.is_transfer is False
+-
+-
+-def test_transfer_route(finder):
+-    result = finder.find_route(1, 5)
+-    assert result.is_transfer is True
+-    assert result.transfer_stop_id == 4
+-
+-
+-def test_no_route_to_isolated_stop(finder):
+-    with pytest.raises(NoRouteFoundError):
+-        finder.find_route(1, 99)
+-
+-
+-def test_same_source_and_destination_raises(finder):
+-    with pytest.raises(ValueError):
+-        finder.find_route(1, 1)
+-
+-
+-def test_bfs_matches_dijkstra_on_direct_route(finder):
+-    dijkstra_result = finder.find_route(1, 3)
+-    bfs_result = finder.find_route_bfs(1, 3)
+-    assert dijkstra_result.stop_ids == bfs_result.stop_ids
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/tests/test_sample_data.py b/backend/app/graph_engine/tests/test_sample_data.py
+deleted file mode 100644
+index 80beaec..0000000
+--- a/backend/app/graph_engine/tests/test_sample_data.py
++++ /dev/null
+@@ -1,34 +0,0 @@
+-"""Tests for sample_data.py — is the miniature Kathmandu network well-formed."""
+-from app.graph_engine.sample_data import STOPS, ROUTE_STOPS
+-from app.graph_engine.utils import haversine_distance
+-from app.graph_engine.constants import INTERCHANGE_DISTANCE
+-
+-
+-def test_has_at_least_two_routes():
+-    route_ids = {rs.route_id for rs in ROUTE_STOPS}
+-    assert len(route_ids) >= 2
+-
+-
+-def test_has_a_disconnected_stop_for_edge_case_testing():
+-    connected_ids = {rs.stop_id for rs in ROUTE_STOPS}
+-    disconnected = [s for s in STOPS if s.stop_id not in connected_ids]
+-    assert len(disconnected) >= 1
+-
+-
+-def test_interchange_pair_is_actually_close_enough_to_be_detected():
+-    """The two Tripureshwor rows (stop 3, stop 4) must be within the
+-    interchange proximity threshold, or graph_builder.py will silently
+-    fail to connect them and no transfer route will ever be found."""
+-    stop_a = next(s for s in STOPS if s.stop_id == 3)
+-    stop_b = next(s for s in STOPS if s.stop_id == 4)
+-    d = haversine_distance(stop_a.lat, stop_a.lng, stop_b.lat, stop_b.lng)
+-    assert d <= INTERCHANGE_DISTANCE
+-
+-
+-def test_all_route_stops_reference_a_real_stop_id():
+-    """Catches typos: a route_stops row pointing at a stop_id that
+-    doesn't exist in STOPS would crash graph_builder.py with a KeyError."""
+-    stop_ids = {s.stop_id for s in STOPS}
+-    for rs in ROUTE_STOPS:
+-        assert rs.stop_id in stop_ids
+-        
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/tests/test_utils.py b/backend/app/graph_engine/tests/test_utils.py
+deleted file mode 100644
+index 5e373f9..0000000
+--- a/backend/app/graph_engine/tests/test_utils.py
++++ /dev/null
+@@ -1,21 +0,0 @@
+-"""Tests for utils.py — is the distance calculation numerically correct."""
+-from app.graph_engine.utils import haversine_distance
+-
+-
+-def test_distance_between_identical_points_is_zero():
+-    d = haversine_distance(27.7075, 85.3155, 27.7075, 85.3155)
+-    assert d == 0
+-
+-
+-def test_distance_matches_known_real_world_trip():
+-    """Ratnapark -> Tripureshwor is a known, short real-world distance --
+-    checked against a plausible range, not an exact hardcoded value,
+-    since haversine gives straight-line distance, not road distance."""
+-    d = haversine_distance(27.7075, 85.3155, 27.6953, 85.3130)
+-    assert 1000 < d < 2000
+-
+-
+-def test_distance_is_symmetric():
+-    d1 = haversine_distance(27.7075, 85.3155, 27.6953, 85.3130)
+-    d2 = haversine_distance(27.6953, 85.3130, 27.7075, 85.3155)
+-    assert abs(d1 - d2) < 0.001
+\ No newline at end of file
+diff --git a/backend/app/graph_engine/utils.py b/backend/app/graph_engine/utils.py
+deleted file mode 100644
+index de2944b..0000000
+--- a/backend/app/graph_engine/utils.py
++++ /dev/null
+@@ -1,20 +0,0 @@
+-"""Minimal helpers: haversine distance in metres."""
+-
+-import math
+-
+-from .constants import EARTH_RADIUS
+-
+-
+-def haversine_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+-    phi1 = math.radians(lat1)
+-    phi2 = math.radians(lat2)
+-    d_phi = math.radians(lat2 - lat1)
+-    d_lambda = math.radians(lng2 - lng1)
+-
+-    a = (
+-        math.sin(d_phi / 2) ** 2
+-        + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+-    )
+-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+-    return float(EARTH_RADIUS * c)
+-
+diff --git a/backend/app/routing/constants.py b/backend/app/routing/constants.py
+new file mode 100644
+index 0000000..de7c643
+--- /dev/null
++++ b/backend/app/routing/constants.py
+@@ -0,0 +1,13 @@
++"""Small set of tunable constants (meters) for the routing graph.
++
++Relocated from app/graph_engine/constants.py (2026-08-07) when the old
++int-ID graph_engine module was removed as dead code — this is the only
++piece of it that was actually used by the live app/routing module.
++
++These are placeholder values; re-tune against real Kathmandu interchange
++measurements before this goes to prod (see app/routing/graph_builder.py).
++"""
++
++EARTH_RADIUS: int = 6_371_000
++INTERCHANGE_DISTANCE: int = 100
++TRANSFER_PENALTY: int = 900
+diff --git a/backend/app/routing/graph_builder.py b/backend/app/routing/graph_builder.py
+index 1a6a1a4..c17e21b 100644
+--- a/backend/app/routing/graph_builder.py
++++ b/backend/app/routing/graph_builder.py
+@@ -15,8 +15,8 @@ Graph shape:
+     as a single-transfer route, and TRANSFER_PENALTY is what makes it
+     prefer a direct route unless the transfer is genuinely faster.
+ 
+-Both constants come from app.graph_engine.constants — see that file for
+-the placeholder values and the note that they should be re-tuned (Phase 7)
++Both constants come from app.routing.constants — see that file for the
++placeholder values and the note that they should be re-tuned (Phase 7)
+ against real Kathmandu interchange measurements before this goes to prod.
+ """
+ 
+@@ -26,7 +26,7 @@ import networkx as nx
+ from sqlalchemy.orm import Session
+ 
+ from app.db.queries import get_active_routes
+-from app.graph_engine.constants import EARTH_RADIUS, INTERCHANGE_DISTANCE, TRANSFER_PENALTY
++from app.routing.constants import EARTH_RADIUS, INTERCHANGE_DISTANCE, TRANSFER_PENALTY
+ 
+ # Simple process-local cache so repeated /route-finder calls in the same
+ # worker don't rebuild the whole graph from the DB every time. Call
+diff --git a/backend/tests/test_routing.py b/backend/tests/test_routing.py
+index a7cc890..4514126 100644
+--- a/backend/tests/test_routing.py
++++ b/backend/tests/test_routing.py
+@@ -102,7 +102,7 @@ def test_transfer_edge_created_between_close_stops_on_different_routes(two_route
+     assert edge["is_transfer"] is True
+     assert edge["route_id"] is None
+     # weight must include the transfer penalty on top of the real walking distance
+-    from app.graph_engine.constants import TRANSFER_PENALTY
++    from app.routing.constants import TRANSFER_PENALTY
+     assert edge["weight"] > TRANSFER_PENALTY
+ 
+ 

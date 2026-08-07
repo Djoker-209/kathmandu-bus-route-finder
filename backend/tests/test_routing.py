@@ -102,7 +102,7 @@ def test_transfer_edge_created_between_close_stops_on_different_routes(two_route
     assert edge["is_transfer"] is True
     assert edge["route_id"] is None
     # weight must include the transfer penalty on top of the real walking distance
-    from app.graph_engine.constants import TRANSFER_PENALTY
+    from app.routing.constants import TRANSFER_PENALTY
     assert edge["weight"] > TRANSFER_PENALTY
 
 
