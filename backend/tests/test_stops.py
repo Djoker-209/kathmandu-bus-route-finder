@@ -8,6 +8,9 @@ Pure-logic routing tests live in app/routing/tests/ instead.
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from sqlalchemy import cast, func
+from sqlalchemy import select, func
+from app.models import Stop
 
 from app.db import queries
 from app.db.session import SessionLocal
@@ -31,8 +34,13 @@ def test_nearest_stop_returns_closest_within_radius(db):
         from geoalchemy2.functions import ST_Distance
 
         distances = [
-            db.scalar(ST_Distance(s.geom, "SRID=4326;POINT(85.3145 27.7040)")) for s in results
-        ]
+            db.scalar(
+                select(func.ST_Distance(Stop.geom, "SRID=4326;POINT(85.3145 27.7040)")).where(
+                Stop.stop_id == s.stop_id
+            )
+        )
+        for s in results
+ ]
         assert distances == sorted(distances)
 
 

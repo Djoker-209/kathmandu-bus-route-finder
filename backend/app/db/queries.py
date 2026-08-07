@@ -50,7 +50,7 @@ def get_route(session: Session, route_id: str) -> Optional[Route]:
     return session.execute(stmt).scalar_one_or_none()
 
 
-def get_route_stops_ordered(session: Session, route_id: str) -> Sequence[RouteStop]:
+def get_route_stops(session: Session, route_id: str) -> Sequence[RouteStop]:
     """Stops on a route, in sequence_no order, each with its Stop eager-loaded."""
     stmt = (
         select(RouteStop)

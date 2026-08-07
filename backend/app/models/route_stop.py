@@ -1,20 +1,37 @@
 """ORM model for `route_stops`, the ordered join table between routes
-and stops. Kept in sync with migrations/versions/0001_initial_schema.py.
+and stops. Kept in sync with migrations/versions/0002_replace_with_full_schema.py.
 """
-
-from sqlalchemy import ForeignKey, Integer, PrimaryKeyConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Integer,
+    PrimaryKeyConstraint,
+    Text,
+)
+from sqlalchemy.orm import relationship
 
 from .base import Base
 
 
 class RouteStop(Base):
     __tablename__ = "route_stops"
-    __table_args__ = (PrimaryKeyConstraint("route_id", "sequence_order"),)
 
-    route_id: Mapped[int] = mapped_column(Integer, ForeignKey("routes.route_id", ondelete="CASCADE"), nullable=False)
-    stop_id: Mapped[int] = mapped_column(Integer, ForeignKey("stops.stop_id", ondelete="CASCADE"), nullable=False)
-    sequence_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    route_id = Column(
+        Text, ForeignKey("routes.route_id", ondelete="CASCADE"), nullable=False
+    )
+    stop_id = Column(
+        Text, ForeignKey("stops.stop_id", ondelete="RESTRICT"), nullable=False
+    )
+    sequence_no = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint("route_id", "sequence_no"),
+        CheckConstraint("sequence_no > 0", name="ck_route_stops_sequence_no"),
+    )
+
+    route = relationship("Route", back_populates="route_stops")
+    stop = relationship("Stop", back_populates="route_stops")
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<RouteStop route={self.route_id} stop={self.stop_id} seq={self.sequence_order}>"
+        return f"<RouteStop route={self.route_id} stop={self.stop_id} seq={self.sequence_no}>"
