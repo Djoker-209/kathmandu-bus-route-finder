@@ -16,7 +16,12 @@ class StopOut(BaseModel):
     is_interchange: bool
     status: str
 
-
+class StopListOut(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    items: list[StopOut]
+    
 class StopWithDistance(StopOut):
     distance_m: Optional[float] = None
 
@@ -41,9 +46,6 @@ class RouteOut(BaseModel):
     total_stops: int
     approx_distance_km: Optional[float] = None
     status: str
-    # Route.operator (the column) is the free-text name as originally
-    # recorded in the source data; the *linked* operator row lives on the
-    # relationship Route.operator_ref, so pull from there instead.
     operator: Optional[OperatorOut] = Field(default=None, validation_alias="operator_ref")
 
 
@@ -53,20 +55,13 @@ class RouteStopOut(BaseModel):
     sequence_no: int
     stop: StopOut
 
-class StopListOut(BaseModel):
-    total: int
-    limit: int
-    offset: int
-    items: list[StopOut]
 
 class RouteLeg(BaseModel):
-    """One uninterrupted ride on a single route, part of a route-finder result."""
     route_id: str
     route_name: str
     board_stop: StopOut
     alight_stop: StopOut
     num_stops: int
-    road_geometry: Optional[dict] = None
 
 
 class RouteFinderResult(BaseModel):
@@ -75,3 +70,44 @@ class RouteFinderResult(BaseModel):
     total_cost: float
     transfer_count: int
     legs: list[RouteLeg]
+
+
+# ---------------------------------------------------------------------------
+# Admin write endpoints (app/api/admin.py) -- request bodies only.
+# ---------------------------------------------------------------------------
+
+class StopCreate(BaseModel):
+    stop_id: str = Field(min_length=1, max_length=20)
+    stop_name: str = Field(min_length=1, max_length=150)
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    aliases: Optional[str] = None
+    zone: Optional[str] = None
+    district: Optional[str] = None
+    ward: Optional[int] = None
+    landmark: Optional[str] = None
+    is_major_stop: bool = False
+    is_interchange: bool = False
+
+
+class RouteCreate(BaseModel):
+    route_id: str = Field(min_length=1, max_length=20)
+    route_name: str = Field(min_length=1, max_length=150)
+    vehicle_type: str = Field(min_length=1, max_length=20)
+    start_stop_id: str
+    end_stop_id: str
+    short_name: Optional[str] = None
+    operator_id: Optional[str] = None
+    is_bidirectional: bool = False
+
+
+class RouteStopCreate(BaseModel):
+    stop_id: str
+    sequence_no: int = Field(ge=1)
+
+
+class RouteRecomputeOut(BaseModel):
+    route_id: str
+    start_stop_id: str
+    end_stop_id: str
+    total_stops: int

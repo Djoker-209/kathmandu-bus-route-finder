@@ -18,10 +18,15 @@ class Settings(BaseSettings):
 
     # Default radius (meters) for GET /stops/nearby when the caller omits it.
     DEFAULT_NEARBY_RADIUS_M: int = 500
-
+    # Shared-secret header value required on all /admin routes (see
+    # app/core/security.py). No default on purpose — startup should fail
+    # loudly in any environment that forgot to set it, rather than silently
+    # accepting a blank/guessable key.
+    admin_api_key: str
     # Default / max page size for GET /stops.
     DEFAULT_PAGE_SIZE: int = 50
     MAX_PAGE_SIZE: int = 200
+    DEFAULT_NEARBY_RADIUS_M: int = 500
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
