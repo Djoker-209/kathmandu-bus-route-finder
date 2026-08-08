@@ -15,7 +15,7 @@ Graph shape:
     as a single-transfer route, and TRANSFER_PENALTY is what makes it
     prefer a direct route unless the transfer is genuinely faster.
 
-Both constants come from app.graph_engine.constants — see that file for
+Both constants live in app.routing.constants — see that file for
 the placeholder values and the note that they should be re-tuned (Phase 7)
 against real Kathmandu interchange measurements before this goes to prod.
 """
@@ -26,7 +26,7 @@ import networkx as nx
 from sqlalchemy.orm import Session
 
 from app.db.queries import get_active_routes
-from app.graph_engine.constants import EARTH_RADIUS, INTERCHANGE_DISTANCE, TRANSFER_PENALTY
+from app.routing.constants import EARTH_RADIUS, INTERCHANGE_DISTANCE, TRANSFER_PENALTY
 
 # Simple process-local cache so repeated /route-finder calls in the same
 # worker don't rebuild the whole graph from the DB every time. Call

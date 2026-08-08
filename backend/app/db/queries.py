@@ -8,9 +8,10 @@ Session so callers control transaction/connection lifecycle.
 
 from typing import List, Optional, Sequence
 
-from geoalchemy2.functions import ST_Distance, ST_DWithin
+from geoalchemy2.functions import ST_Distance, ST_DWithin, ST_GeogFromText
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
+
 
 from ..models import FareRule, Operator, Route, RouteOperator, RouteStop, Stop
 
@@ -23,7 +24,7 @@ def nearest_stops(
     limit: int = 10,
 ) -> Sequence[Stop]:
     """Stops within radius_m metres of (lat, lng), nearest first."""
-    point = f"SRID=4326;POINT({lng} {lat})"
+    point = ST_GeogFromText(f"SRID=4326;POINT({lng} {lat})")
     stmt = (
         select(Stop)
         .where(ST_DWithin(Stop.geom, point, radius_m))

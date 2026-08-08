@@ -5,6 +5,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKey,
+    Index,
     Integer,
     PrimaryKeyConstraint,
     Text,
@@ -28,6 +29,8 @@ class RouteStop(Base):
     __table_args__ = (
         PrimaryKeyConstraint("route_id", "sequence_no"),
         CheckConstraint("sequence_no > 0", name="ck_route_stops_sequence_no"),
+        Index("idx_route_stops_route_id", "route_id"),
+        Index("idx_route_stops_stop_id", "stop_id"),
     )
 
     route = relationship("Route", back_populates="route_stops")

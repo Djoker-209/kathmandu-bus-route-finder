@@ -3,6 +3,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     Text,
@@ -66,6 +67,11 @@ class Route(Base):
 
     __table_args__ = (
         CheckConstraint("total_stops >= 0", name="ck_routes_total_stops"),
+        Index("idx_routes_end_stop", "end_stop_id"),
+        Index("idx_routes_operator_id", "operator_id"),
+        Index("idx_routes_start_stop", "start_stop_id"),
+        Index("idx_routes_status", "status"),
+        Index("idx_routes_vehicle_type", "vehicle_type"),
     )
 
     operator_ref = relationship("Operator", back_populates="routes")

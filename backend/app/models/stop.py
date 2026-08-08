@@ -3,6 +3,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Float,
+    Index,
     Integer,
     Text,
     TIMESTAMP,
@@ -53,6 +54,9 @@ class Stop(Base):
     __table_args__ = (
         CheckConstraint("lat BETWEEN -90 AND 90", name="ck_stops_lat"),
         CheckConstraint("lng BETWEEN -180 AND 180", name="ck_stops_lng"),
+        Index("idx_stops_district", "district"),
+        Index("idx_stops_geom", "geom", postgresql_using="gist"),
+        Index("idx_stops_status", "status"),
     )
 
     route_stops = relationship("RouteStop", back_populates="stop")

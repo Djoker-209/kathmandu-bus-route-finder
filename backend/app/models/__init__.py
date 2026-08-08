@@ -6,6 +6,7 @@ from .route_stop import RouteStop
 from .route_operator import RouteOperator
 from .route_return_leg_priority import RouteReturnLegPriority
 from .fare_rule import FareRule
+from .admin_user import AdminUser
 
 __all__ = [
     "Base",
@@ -16,4 +17,5 @@ __all__ = [
     "RouteOperator",
     "RouteReturnLegPriority",
     "FareRule",
+    "AdminUser",
 ]

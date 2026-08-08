@@ -1,4 +1,4 @@
-from sqlalchemy import CheckConstraint, Column, FetchedValue, Numeric, Text
+from sqlalchemy import CheckConstraint, Column, FetchedValue, Index, Numeric, Text
 from sqlalchemy.dialects.postgresql import NUMRANGE
 
 from .base import Base
@@ -35,6 +35,7 @@ class FareRule(Base):
             "student_discount_pct IS NULL OR (student_discount_pct BETWEEN 0 AND 100)",
             name="ck_fare_rules_discount_pct",
         ),
+        Index("idx_fare_rules_distance_range", "distance_range", postgresql_using="gist"),
         # The fare_rules_distance_range_excl GiST EXCLUDE constraint (no two
         # bands may overlap) is DB-only — created by the 0002 migration,
         # not representable in the ORM layer.

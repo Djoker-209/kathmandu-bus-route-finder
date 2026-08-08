@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, ForeignKey, PrimaryKeyConstraint, Text, text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, PrimaryKeyConstraint, Text, text
 from sqlalchemy.orm import relationship
 
 from .base import Base
@@ -15,7 +15,16 @@ class RouteOperator(Base):
     )
     is_primary = Column(Boolean, nullable=False, server_default=text("false"))
 
-    __table_args__ = (PrimaryKeyConstraint("route_id", "operator_id"),)
+    __table_args__ = (
+        PrimaryKeyConstraint("route_id", "operator_id"),
+        Index("idx_route_operators_operator_id", "operator_id"),
+        Index(
+            "uq_route_operators_primary",
+            "route_id",
+            unique=True,
+            postgresql_where=text("is_primary"),
+        ),
+    )
 
     route = relationship("Route", back_populates="route_operators")
     operator = relationship("Operator", back_populates="route_links")
