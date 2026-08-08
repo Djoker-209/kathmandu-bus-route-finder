@@ -305,7 +305,7 @@ def dedup_routes(
     route_stops = route_stops[~route_stops["route_id"].isin(dropped_route_ids)]
     route_operators = route_operators[~route_operators["route_id"].isin(dropped_route_ids)]
 
-    return routes.reset_index(drop=True), route_stops.reset_index(drop=True), route_operators.reset_index(drop=True)
+    return routes.reset_index(drop=True), route_stops.reset_index(drop=True), route_operators.reset_index(drop=True), dropped_route_ids
 
 
 def load_csv(path: Path) -> pd.DataFrame:
@@ -677,7 +677,7 @@ def main() -> int:
 
     route_stops = clean_route_stops(route_stops_raw, stops, stats)
 
-    routes_raw, route_stops, route_operators = dedup_routes(
+    routes_raw, route_stops, route_operators, dropped_route_ids = dedup_routes(
         routes_raw, route_stops, route_operators, stats,
         overrides_path=Path("data/scripts/route_dedup_overrides.yaml"),
     )
@@ -701,6 +701,13 @@ def main() -> int:
     return_leg_path = args.raw_dir / RAW_FILENAMES["return_leg"]
     if return_leg_path.exists():
         return_leg = load_csv(return_leg_path)
+        orphaned = return_leg[return_leg["route_id"].isin(dropped_route_ids)]
+        if len(orphaned):
+            log.info(
+                "Dropping %d return_leg_verification_priority row(s) referencing merged-away routes: %s",
+                len(orphaned), orphaned["route_id"].tolist(),
+            )
+        return_leg = return_leg[~return_leg["route_id"].isin(dropped_route_ids)]
         return_leg.to_csv(args.out_dir / "return_leg_verification_priority_clean.csv", index=False)
     else:
         log.warning("Skipping return_leg_verification_priority — %s not found", return_leg_path)

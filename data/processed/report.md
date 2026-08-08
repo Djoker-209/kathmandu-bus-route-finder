@@ -1,10 +1,10 @@
 # Orphan-pair audit & cleanup report — Kathmandu Bus Route Finder
 
-_Generated 2026-08-08T04:05:33Z by scripts/clean_data.py_
+_Generated 2026-08-08T06:00:05Z by scripts/clean_data.py_
 
 | Table | Rows before | Rows after |
 |---|---|---|
-| operators.csv | 28 | 28 |
+| operators.csv | 29 | 29 |
 | stops.csv | 317 | 302 |
 | routes.csv | 94 | 88 |
 | route_stops.csv | 1818 | 1662 |
@@ -103,11 +103,11 @@ _Generated 2026-08-08T04:05:33Z by scripts/clean_data.py_
 - total_stops corrected:   0 -> []
 
 ## 4. routes.operator_id orphan references
-- Invalid operator_id value(s): ['OP030']
-- Routes nulled (unrecoverable): 3 -> ['R2295986', 'R2295974', 'R2301161']
+- Invalid operator_id value(s): []
+- Routes nulled (unrecoverable): 0 -> []
 
 ## 5. Distance outlier flags
-- Routes flagged distance_flagged_for_recompute: 9 -> ['R2276770', 'R2295941', 'R2301357', 'R3070257', 'R3070262', 'R3070344', 'R3071562', 'R3028077', 'R2302674']
+- Routes flagged distance_flagged_for_recompute: 0 -> []
 
 ## 6. Post-cleanup verification (must all read 0)
 - route_stops.stop_id not in stops: 0
