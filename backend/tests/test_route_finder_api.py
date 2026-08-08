@@ -32,13 +32,13 @@ def client():
 
 def test_route_finder_consolidates_consecutive_same_route_legs(client):
     """
-    S0002 -> S0004 is a known multi-transfer path that rides 6 distinct
-    routes. Before the fix, each raw graph edge became its own leg (10
-    legs for this path, several sharing the same route_id back-to-back).
-    After the fix, consecutive same-route segments must be merged into a
-    single leg per route ridden.
+    S0044 -> S0275 is a known multi-transfer path that rides 5 distinct
+    routes (R3229256 is ridden twice, non-consecutively). Before the fix,
+    each raw graph edge became its own leg, several sharing the same
+    route_id back-to-back. After the fix, consecutive same-route segments
+    must be merged into a single leg per route ridden.
     """
-    resp = client.get("/route-finder", params={"origin": "S0002", "destination": "S0004"})
+    resp = client.get("/route-finder", params={"origin": "S0044", "destination": "S0275"})
     assert resp.status_code == 200
     body = resp.json()
 
@@ -54,12 +54,12 @@ def test_route_finder_consolidates_consecutive_same_route_legs(client):
 
     # Known shape of this specific path as of the current dataset.
     assert route_ids == [
-        "R3074202",
-        "R3213434",
-        "R3218289",
-        "R3020174",
-        "R3070262",
-        "R2988806",
+        "R3232098",
+        "R-SAJHA-04",
+        "R3229256",
+        "R3020231",
+        "R3229256",
+        "R2302674",
     ]
 
 
@@ -70,7 +70,7 @@ def test_route_finder_transfer_count_matches_leg_boundaries(client):
     connecting them was flagged is_transfer (walking) or not (same-stop
     route change).
     """
-    resp = client.get("/route-finder", params={"origin": "S0002", "destination": "S0004"})
+    resp = client.get("/route-finder", params={"origin": "S0044", "destination": "S0275"})
     assert resp.status_code == 200
     body = resp.json()
 
@@ -85,14 +85,14 @@ def test_route_finder_leg_num_stops_reflects_consolidated_hops(client):
     internally consistent (each leg's num_stops counts the hops folded
     into it, not just always 1 as it did pre-fix).
     """
-    resp = client.get("/route-finder", params={"origin": "S0002", "destination": "S0004"})
+    resp = client.get("/route-finder", params={"origin": "S0044", "destination": "S0275"})
     assert resp.status_code == 200
     legs = resp.json()["legs"]
 
-    # First leg on R3074202 covers 3 raw hops (S0002 -> S0195 via 2
-    # intermediate stops) per the known shape of this path.
-    assert legs[0]["route_id"] == "R3074202"
-    assert legs[0]["num_stops"] == 3
+    # First leg on R3232098 covers 4 raw hops (S0044 -> S0087) per the
+    # known shape of this path.
+    assert legs[0]["route_id"] == "R3232098"
+    assert legs[0]["num_stops"] == 4
 
     # At least one leg must have been consolidated (num_stops > 1) --
     # guards against a future regression back to "always 1".
