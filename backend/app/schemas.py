@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -108,6 +108,9 @@ class StopCreate(BaseModel):
         if not v:
             raise ValueError("stop_name must not be blank")
         return v
+
+class RouteStatusUpdate(BaseModel):
+    status: Literal["active", "pending_release"]
 
 
 class RouteCreate(BaseModel):

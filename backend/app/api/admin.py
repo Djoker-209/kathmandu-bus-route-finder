@@ -17,7 +17,7 @@ from app.models import Route as RouteORM
 from app.models import RouteStop as RouteStopORM
 from app.models import Stop as StopORM
 
-from app.schemas import RouteCreate, RouteOut, RouteStopCreate, StopCreate, StopOut
+from app.schemas import RouteCreate, RouteOut, RouteStatusUpdate, RouteStopCreate, StopCreate, StopOut
 
 router = APIRouter(dependencies=[Depends(require_admin_key)])
 
@@ -97,6 +97,21 @@ def add_route_stop(route_id: str, payload: RouteStopCreate, db: Session = Depend
 
     return {"route_id": route_id, "stop_id": payload.stop_id, "sequence_no": payload.sequence_no}
 
+@router.patch("/routes/{route_id}/status", response_model=RouteOut)
+def update_route_status(route_id: str, payload: RouteStatusUpdate, db: Session = Depends(get_db)) -> RouteOut:
+    row = db.get(RouteORM, route_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Route {route_id} not found.")
+
+    row.status = payload.status
+    db.commit()
+    db.refresh(row)
+
+    # Auto-invalidate so the change is live immediately -- no separate
+    # /admin/rebuild-graph call needed, matching /graph/reload's behavior.
+    get_cached_graph(db, refresh=True)
+
+    return RouteOut.model_validate(row)
 
 @router.post("/graph/reload", status_code=status.HTTP_200_OK)
 def reload_graph_cache(db: Session = Depends(get_db)) -> dict:
