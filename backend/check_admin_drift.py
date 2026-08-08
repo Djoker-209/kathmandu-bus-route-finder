@@ -71,7 +71,7 @@ else:
         if "created_at" in body:
             has_default = re.search(r"created_at.*(server_default|default\s*=)", body, re.DOTALL)
             print("  created_at has a default:", bool(has_default),
-                  "(handover flagged this as missing - expect False)")
+                  )
 
 print()
 print("=== 5. Migration sanity: single head, admin_users table present ===")
