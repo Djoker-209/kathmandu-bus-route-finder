@@ -25,16 +25,20 @@ Requires: pandas, pyyaml (only if using --config). See requirements.txt.
 """
 
 from __future__ import annotations
+from scipy.cluster.hierarchy import linkage, fcluster
+from scipy.spatial.distance import squareform
 
 import argparse
 import json
 import logging
 import math
 import sys
+import difflib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 logging.basicConfig(
@@ -69,7 +73,31 @@ class CleaningStats:
     revisit_routes: int = 0
     distance_flagged_routes: list[str] = field(default_factory=list)
     verification: dict[str, int] = field(default_factory=dict)
+    stop_dedup_groups: list[list[str]] = field(default_factory=list)
+    stop_dedup_dropped: int = 0
+    route_dedup_merged: list[tuple[str, str]] = field(default_factory=list)
+    route_dedup_marked_bidirectional: list[str] = field(default_factory=list)
+    stop_dedup_candidates: list[list[str]] = field(default_factory=list)
+    stop_dedup_pending_review: list[list[str]] = field(default_factory=list)
+    route_dedup_candidates: list[dict] = field(default_factory=list)
+    route_dedup_pending_review: list[dict] = field(default_factory=list)
 
+
+
+def _normalize_stop_name(name: str) -> str:
+    """Strip common boilerplate so real name variants compare cleanly."""
+    n = str(name).strip().lower()
+    for suffix in (" chowk / junction", " chowk/junction", " stop", " station"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    return n.strip()
+
+
+def _names_similar(name_a: str, name_b: str, threshold: float = 0.55) -> bool:
+    a, b = _normalize_stop_name(name_a), _normalize_stop_name(name_b)
+    if not a or not b:
+        return False
+    return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
 
 def haversine_km(lat1, lng1, lat2, lng2) -> float:
     """Great-circle distance in km between two lat/lng points."""
@@ -79,6 +107,205 @@ def haversine_km(lat1, lng1, lat2, lng2) -> float:
     dlambda = math.radians(lng2 - lng1)
     a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
     return 2 * r * math.asin(math.sqrt(a))
+
+
+def dedup_stops(
+    stops: pd.DataFrame, stats: CleaningStats, overrides_path: Path | None = None
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Propose stop-duplicate clusters via ~250m complete-linkage distance
+    clustering, but only actually merge pairs confirmed in overrides_path
+    (stop_dedup_overrides.yaml). Distance alone cannot distinguish "same
+    stop, different name/script" from "different but nearby stops" — see
+    report.md history for concrete false positives found by hand. All
+    proposed candidates are recorded for human review regardless of
+    whether they're confirmed."""
+    from scipy.cluster.hierarchy import linkage, fcluster
+    from scipy.spatial.distance import squareform
+
+    DEDUP_RADIUS_M = 250
+
+    df = stops.reset_index(drop=True)
+    n = len(df)
+    lat = df["lat"].to_numpy()
+    lng = df["lng"].to_numpy()
+    id_to_idx = {sid: i for i, sid in enumerate(df["stop_id"])}
+
+    dist_matrix = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = haversine_km(lat[i], lng[i], lat[j], lng[j]) * 1000
+            dist_matrix[i, j] = dist_matrix[j, i] = d
+
+    condensed = squareform(dist_matrix, checks=False)
+    Z = linkage(condensed, method="complete")
+    cluster_labels = fcluster(Z, t=DEDUP_RADIUS_M, criterion="distance")
+
+    candidate_clusters: list[list[str]] = []
+    label_groups: dict[int, list[int]] = {}
+    for idx, label in enumerate(cluster_labels):
+        label_groups.setdefault(label, []).append(idx)
+    for members in label_groups.values():
+        if len(members) > 1:
+            candidate_clusters.append([df.at[idx, "stop_id"] for idx in members])
+
+    stats.stop_dedup_candidates = candidate_clusters
+
+    # Load human-confirmed merges. Nothing merges without this.
+    confirmed: dict[str, str] = {}  # dropped_id -> keeper_id
+    if overrides_path and overrides_path.exists():
+        import yaml
+        with open(overrides_path) as f:
+            data = yaml.safe_load(f) or {}
+        for entry in data.get("confirmed_merges", []):
+            keeper = entry["keep"]
+            for dropped in entry.get("drop", []):
+                confirmed[dropped] = keeper
+
+    def completeness(idx: int) -> int:
+        row = df.iloc[idx]
+        return sum(1 for v in row.values if str(v).strip() not in ("", "nan", "None"))
+
+    remap: dict[str, str] = {}
+    for dropped_id, keeper_id in confirmed.items():
+        if dropped_id not in id_to_idx or keeper_id not in id_to_idx:
+            log.warning(
+                "stop_dedup_overrides.yaml references unknown stop_id (keep=%s, drop=%s) — skipped",
+                keeper_id, dropped_id,
+            )
+            continue
+        remap[dropped_id] = keeper_id
+        stats.stop_dedup_groups.append([keeper_id, dropped_id])
+
+    unconfirmed_candidates = [
+        c for c in candidate_clusters if not any(sid in confirmed for sid in c)
+    ]
+    if unconfirmed_candidates:
+        log.info(
+            "%d candidate duplicate cluster(s) proposed but NOT merged — "
+            "needs human review, see report.md and add confirmed pairs to %s",
+            len(unconfirmed_candidates), overrides_path,
+        )
+
+    stats.stop_dedup_dropped = len(remap)
+    stats.stop_dedup_pending_review = unconfirmed_candidates
+
+    keep_indices = [i for i in range(n) if df.at[i, "stop_id"] not in remap]
+    deduped = df.iloc[sorted(keep_indices)].reset_index(drop=True)
+    return deduped, remap
+
+def remap_stop_ids(route_stops: pd.DataFrame, remap: dict[str, str]) -> pd.DataFrame:
+    """Apply a {dropped_stop_id: kept_stop_id} remap to route_stops.stop_id."""
+    if not remap:
+        return route_stops
+    df = route_stops.copy()
+    df["stop_id"] = df["stop_id"].map(lambda sid: remap.get(sid, sid))
+    return df
+
+
+def _stop_set_similarity(a: frozenset, b: frozenset) -> float:
+    """Jaccard similarity between two stop sets."""
+    if not a and not b:
+        return 1.0
+    return len(a & b) / len(a | b)
+
+
+def dedup_routes(
+    routes: pd.DataFrame,
+    route_stops: pd.DataFrame,
+    route_operators: pd.DataFrame,
+    stats: CleaningStats,
+    overrides_path: Path | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Propose route-duplicate candidates (same operator, stop-set Jaccard
+    similarity >= threshold) but only merge pairs confirmed in
+    overrides_path (route_dedup_overrides.yaml). Exact reverse-sequence
+    matches are flagged specially since they're the clearest case for
+    is_bidirectional, but even those require explicit confirmation —
+    some "duplicates" (see R2988835/R2988836) turn out to be genuinely
+    different route variants with partial stop overlap, not simple
+    A-to-B/B-to-A pairs."""
+    SIMILARITY_THRESHOLD = 0.7
+
+    if "is_bidirectional" not in routes.columns:
+        routes = routes.copy()
+        routes["is_bidirectional"] = False
+    else:
+        routes = routes.copy()
+        routes["is_bidirectional"] = (
+            routes["is_bidirectional"].fillna("False").astype(str).str.strip().str.lower().eq("true")
+        )
+
+    ordered = route_stops.sort_values("sequence_no").groupby("route_id")["stop_id"].apply(tuple)
+    routes["stop_seq_tmp"] = routes["route_id"].map(lambda rid: ordered.get(rid, ()))
+    routes["stop_set_tmp"] = routes["stop_seq_tmp"].map(frozenset)
+
+    candidates: list[dict] = []
+    by_operator = routes.groupby("operator_id")
+    for operator_id, group in by_operator:
+        if pd.isna(operator_id) or len(group) < 2:
+            continue
+        rows = list(group[["route_id", "route_name", "stop_seq_tmp", "stop_set_tmp"]].itertuples(index=False))
+        for i in range(len(rows)):
+            for j in range(i + 1, len(rows)):
+                a, b = rows[i], rows[j]
+                sim = _stop_set_similarity(a.stop_set_tmp, b.stop_set_tmp)
+                if sim < SIMILARITY_THRESHOLD:
+                    continue
+                is_exact_reverse = a.stop_seq_tmp == tuple(reversed(b.stop_seq_tmp))
+                candidates.append({
+                    "route_a": a.route_id, "name_a": a.route_name,
+                    "route_b": b.route_id, "name_b": b.route_name,
+                    "operator_id": operator_id,
+                    "similarity": round(sim, 2),
+                    "exact_reverse": is_exact_reverse,
+                })
+
+    stats.route_dedup_candidates = candidates
+
+    confirmed: dict[str, dict] = {}  # dropped_route_id -> {"keep": ..., "bidirectional": bool}
+    if overrides_path and overrides_path.exists():
+        import yaml
+        with open(overrides_path) as f:
+            data = yaml.safe_load(f) or {}
+        for entry in data.get("confirmed_merges", []):
+            keeper = entry["keep"]
+            bidirectional = entry.get("bidirectional", False)
+            for dropped in entry.get("drop", []):
+                confirmed[dropped] = {"keep": keeper, "bidirectional": bidirectional}
+
+    dropped_route_ids: set[str] = set()
+    for dropped_id, info in confirmed.items():
+        keeper_id = info["keep"]
+        if dropped_id not in set(routes["route_id"]) or keeper_id not in set(routes["route_id"]):
+            log.warning(
+                "route_dedup_overrides.yaml references unknown route_id (keep=%s, drop=%s) — skipped",
+                keeper_id, dropped_id,
+            )
+            continue
+        dropped_route_ids.add(dropped_id)
+        stats.route_dedup_merged.append((keeper_id, dropped_id))
+        if info["bidirectional"]:
+            routes.loc[routes["route_id"] == keeper_id, "is_bidirectional"] = True
+            stats.route_dedup_marked_bidirectional.append(keeper_id)
+
+    pending = [
+        c for c in candidates
+        if c["route_a"] not in dropped_route_ids and c["route_b"] not in dropped_route_ids
+        and not (c["route_a"] in confirmed or c["route_b"] in confirmed)
+    ]
+    stats.route_dedup_pending_review = pending
+    if pending:
+        log.info(
+            "%d candidate duplicate route pair(s) proposed but NOT merged — "
+            "needs human review, see report.md and add confirmed pairs to %s",
+            len(pending), overrides_path,
+        )
+
+    routes = routes[~routes["route_id"].isin(dropped_route_ids)].drop(columns=["stop_seq_tmp", "stop_set_tmp"])
+    route_stops = route_stops[~route_stops["route_id"].isin(dropped_route_ids)]
+    route_operators = route_operators[~route_operators["route_id"].isin(dropped_route_ids)]
+
+    return routes.reset_index(drop=True), route_stops.reset_index(drop=True), route_operators.reset_index(drop=True)
 
 
 def load_csv(path: Path) -> pd.DataFrame:
@@ -268,7 +495,7 @@ def clean_routes(
 
     def flag_distance(row) -> bool:
         try:
-            recorded = float(row["approx_distance_km_original"])
+            recorded = float(row["approx_distance_km"])
             hav = float(row["haversine_distance_km"])
         except (TypeError, ValueError):
             return False
@@ -351,6 +578,34 @@ def write_report(stats: CleaningStats, out_path: Path) -> None:
     lines.append(f"- Routes re-sequenced (1..N, order preserved): {stats.resequenced_routes}")
     lines.append("")
 
+    lines.append("## 2b. Stop deduplication (~250m radius candidates)")
+    lines.append(f"- Stops actually merged (human-confirmed via stop_dedup_overrides.yaml): {stats.stop_dedup_dropped}")
+    if stats.stop_dedup_groups:
+        for group in stats.stop_dedup_groups:
+            lines.append(f"    - kept {group[0]}, dropped {group[1:]}")
+    lines.append(f"- Candidate clusters PENDING human review (not merged): {len(stats.stop_dedup_pending_review)}")
+    if stats.stop_dedup_pending_review:
+        lines.append("  Distance alone can't tell 'same stop, different name' from 'different nearby stops' —")
+        lines.append("  add confirmed pairs to data/scripts/stop_dedup_overrides.yaml to merge them:")
+        for group in stats.stop_dedup_pending_review:
+            names = ", ".join(f"{sid} ({df_name_lookup.get(sid, '?')})" for sid in group) if False else ", ".join(group)
+            lines.append(f"    - {group}")
+    lines.append("")
+
+    lines.append("## 2c. Route deduplication (same operator + similar stop set)")
+    lines.append(f"- Routes actually merged (human-confirmed via route_dedup_overrides.yaml): {len(stats.route_dedup_merged)}")
+    for keeper, dropped in stats.route_dedup_merged:
+        lines.append(f"    - kept {keeper}, dropped {dropped}")
+    lines.append(f"- Marked is_bidirectional as a result of merge: {stats.route_dedup_marked_bidirectional}")
+    lines.append(f"- Candidate pairs PENDING human review (not merged): {len(stats.route_dedup_pending_review)}")
+    for c in stats.route_dedup_pending_review:
+        reverse_note = " [EXACT REVERSE — likely a clean bidirectional pair]" if c["exact_reverse"] else ""
+        lines.append(
+            f"    - {c['route_a']} (\"{c['name_a']}\") <-> {c['route_b']} (\"{c['name_b']}\") "
+            f"— stop-set similarity {c['similarity']}{reverse_note}"
+        )
+    lines.append("")
+
     lines.append("## 3. routes.start_stop_id / end_stop_id / total_stops recomputation")
     lines.append(f"- start_stop_id corrected: {len(stats.start_stop_corrected)} -> {stats.start_stop_corrected}")
     lines.append(f"- end_stop_id corrected:   {len(stats.end_stop_corrected)} -> {stats.end_stop_corrected}")
@@ -417,7 +672,16 @@ def main() -> int:
         stats.rows_before[name] = len(df)
 
     stops = clean_stops(stops_raw)
+    stops, stop_id_remap = dedup_stops(stops, stats, overrides_path=Path("data/scripts/stop_dedup_overrides.yaml"))
+    route_stops_raw = remap_stop_ids(route_stops_raw, stop_id_remap)
+
     route_stops = clean_route_stops(route_stops_raw, stops, stats)
+
+    routes_raw, route_stops, route_operators = dedup_routes(
+        routes_raw, route_stops, route_operators, stats,
+        overrides_path=Path("data/scripts/route_dedup_overrides.yaml"),
+    )
+
     routes = clean_routes(routes_raw, route_stops, stops, operators, route_operators, stats)
 
     stats.rows_after["operators.csv"] = len(operators)
