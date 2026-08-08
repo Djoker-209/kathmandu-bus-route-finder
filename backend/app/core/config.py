@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 50
     MAX_PAGE_SIZE: int = 200
 
+    # Shared secret checked by require_admin_key (app/core/security.py).
+    # No default on purpose -- startup should fail loudly if it's unset.
+    admin_api_key: str
+
+    # JWT settings for the AdminUser login flow (app/core/security.py).
+    # No default on jwt_secret_key -- startup should fail loudly if unset.
+    jwt_secret_key: str
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
