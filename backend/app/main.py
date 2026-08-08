@@ -1,9 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
-from app.api import routes, routing, stops
+from app.api import admin, admin_auth, routes, routing, stops
+from app.core.security import require_admin_key
 from app.db.session import SessionLocal
 from app.routing import graph_builder
 
@@ -42,7 +43,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@app.post("/admin/rebuild-graph")
+@app.post("/admin/rebuild-graph", dependencies=[Depends(require_admin_key)])
 def rebuild_graph():
     db = SessionLocal()
     try:
@@ -55,3 +56,5 @@ def rebuild_graph():
 app.include_router(stops.router)
 app.include_router(routes.router)
 app.include_router(routing.router)
+app.include_router(admin.router)
+app.include_router(admin_auth.router)

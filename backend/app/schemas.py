@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StopOut(BaseModel):
@@ -53,11 +53,13 @@ class RouteStopOut(BaseModel):
     sequence_no: int
     stop: StopOut
 
+
 class StopListOut(BaseModel):
     total: int
     limit: int
     offset: int
     items: list[StopOut]
+
 
 class RouteLeg(BaseModel):
     """One uninterrupted ride on a single route, part of a route-finder result."""
@@ -75,3 +77,68 @@ class RouteFinderResult(BaseModel):
     total_cost: float
     transfer_count: int
     legs: list[RouteLeg]
+
+
+# ---------------------------------------------------------------------------
+# Admin write endpoints (app/api/admin.py) -- request bodies for creating
+# stops/routes/route_stops. Server-generated fields (stop_id, route_id,
+# geom, timestamps) are intentionally absent here.
+# ---------------------------------------------------------------------------
+
+class StopCreate(BaseModel):
+    stop_name: str = Field(min_length=1, max_length=150)
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    aliases: str | None = None
+    zone: str | None = None
+    district: str | None = None
+    ward: int | None = None
+    landmark: str | None = None
+    is_major_stop: bool = False
+    has_shelter: bool = False
+    has_ticket_counter: bool = False
+    is_interchange: bool = False
+    wheelchair_access: bool = False
+    audio_support: bool = False
+
+    @field_validator("stop_name")
+    @classmethod
+    def strip_stop_name(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("stop_name must not be blank")
+        return v
+
+
+class RouteCreate(BaseModel):
+    route_name: str = Field(min_length=1, max_length=150)
+    short_name: str | None = Field(default=None, max_length=50)
+    vehicle_type: str = Field(min_length=1, max_length=50)
+    route_type: str | None = Field(default=None, max_length=50)
+    operator: str | None = Field(default=None, max_length=100)
+    operator_id: str | None = None
+    start_stop_id: str
+    end_stop_id: str
+    total_stops: int = Field(ge=0)
+    is_bidirectional: bool = False
+    has_ac: bool = False
+    is_express: bool = False
+
+
+class RouteStopCreate(BaseModel):
+    stop_id: str
+    sequence_no: int = Field(ge=1)
+
+
+# ---------------------------------------------------------------------------
+# Admin login (AdminUser)
+# ---------------------------------------------------------------------------
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1)
+
+
+class AdminTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
