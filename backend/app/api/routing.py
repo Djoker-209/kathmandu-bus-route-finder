@@ -47,17 +47,20 @@ def find_route(
 
     legs: list[RouteLeg] = []
     for seg in result.segments:
-        board_stop = queries.get_stop(db, seg.from_stop_id)
-        alight_stop = queries.get_stop(db, seg.to_stop_id)
-        legs.append(
-            RouteLeg(
-                route_id=seg.route_id or "TRANSFER",
-                route_name="Transfer (walk)" if seg.is_transfer else seg.route_id,
-                board_stop=StopOut.model_validate(board_stop),
-                alight_stop=StopOut.model_validate(alight_stop),
-                num_stops=1,
+        seg_route_id = seg.route_id or "TRANSFER"
+        if legs and legs[-1].route_id == seg_route_id:
+            legs[-1].alight_stop = StopOut.model_validate(queries.get_stop(db, seg.to_stop_id))
+            legs[-1].num_stops += 1
+        else:
+            legs.append(
+                RouteLeg(
+                    route_id=seg_route_id,
+                    route_name="Transfer (walk)" if seg.is_transfer else seg.route_id,
+                    board_stop=StopOut.model_validate(queries.get_stop(db, seg.from_stop_id)),
+                    alight_stop=StopOut.model_validate(queries.get_stop(db, seg.to_stop_id)),
+                    num_stops=1,
+                )
             )
-        )
 
     _attach_road_geometry(legs)
 
@@ -65,6 +68,6 @@ def find_route(
         origin_stop_id=origin,
         destination_stop_id=destination,
         total_cost=result.total_cost,
-        transfer_count=result.transfer_count,
+        transfer_count=max(len(legs) - 1, 0),
         legs=legs,
     )
