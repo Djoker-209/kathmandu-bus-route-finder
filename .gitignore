@@ -39,3 +39,4 @@ data/raw/*.pbf
 # --- Docker ---
 *.log
 !data/raw/yatayat_export.osm
+data/import_run.sql
