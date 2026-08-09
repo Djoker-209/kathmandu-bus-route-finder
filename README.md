@@ -21,7 +21,7 @@ docs/        Proposal, defense materials, diagrams
 |------------|----------------------------------------|
 | Frontend   | Next.js 14, TypeScript, Tailwind CSS, Leaflet.js |
 | Backend    | Python 3.11, FastAPI, NetworkX, Pydantic |
-| Database   | PostgreSQL 15 + PostGIS                |
+| Database   | PostgreSQL 16.14 + PostGIS                |
 | Routing    | OSRM (road-network geometry)           |
 
 ## Local development
