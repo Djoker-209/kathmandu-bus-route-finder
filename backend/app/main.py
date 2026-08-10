@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import admin, admin_auth, routes, routing, stops
 from app.core.security import require_admin_key
@@ -29,7 +30,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-
 app = FastAPI(
     title="Kathmandu Bus Route Finder API",
     description="Origin-destination bus route search for the Kathmandu Valley.",
@@ -37,6 +37,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 def health_check():

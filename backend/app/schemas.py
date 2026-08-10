@@ -68,6 +68,7 @@ class RouteLeg(BaseModel):
     board_stop: StopOut
     alight_stop: StopOut
     num_stops: int
+    stops: list[StopOut] = []  # every physical stop on this leg, in order, board→alight inclusive
     road_geometry: Optional[dict] = None
 
 

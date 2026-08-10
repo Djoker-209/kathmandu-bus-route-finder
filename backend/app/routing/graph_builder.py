@@ -3,20 +3,40 @@ routing/graph_builder.py
 
 Builds the NetworkX directed graph used for shortest-path route finding.
 
-Graph shape:
-  - nodes = stop_id, attrs: lat, lng, stop_name
-  - route edges: consecutive stops on an active route (by sequence_no),
-    weight = haversine distance in meters, route_id attached. Reverse
-    edge also added when route.is_bidirectional.
-  - transfer edges: stops on DIFFERENT routes within INTERCHANGE_DISTANCE
-    meters of each other, weight = distance + TRANSFER_PENALTY,
-    route_id=None, is_transfer=True. This is what lets the pathfinder
-    consider "get off here, walk to the nearby stop, catch another bus"
-    as a single-transfer route, and TRANSFER_PENALTY is what makes it
-    prefer a direct route unless the transfer is genuinely faster.
+Graph shape (v2 — see note below on why v1 was broken):
+  - "physical" nodes: stop_id (string). Represents "standing at this real
+    stop, off any bus." attrs: lat, lng, stop_name, kind="physical".
+  - "ride" nodes: (stop_id, route_id) tuple. Represents "on this specific
+    route, currently at this stop." attrs: lat, lng, stop_name, kind="ride".
+  - board edge: physical stop_id -> (stop_id, route_id), weight=
+    TRANSFER_PENALTY, distance_m=0, kind="board". This is where the
+    penalty actually lives now.
+  - alight edge: (stop_id, route_id) -> physical stop_id, weight=0,
+    distance_m=0, kind="alight". Free — getting off a bus costs nothing.
+  - ride edge: (stop_id, route_id) -> (next_stop_id, route_id), weight=
+    haversine distance, distance_m=same, kind="ride". Reverse also added
+    when route.is_bidirectional.
+  - walk edge: physical stop_id -> physical stop_id, for two DIFFERENT
+    stops within INTERCHANGE_DISTANCE metres of each other. weight=
+    distance_m=haversine distance (no penalty added here — the board
+    edge on the far side already re-applies TRANSFER_PENALTY, so walking
+    to a nearby stop and boarding there is priced consistently with
+    switching routes at the same stop).
 
-Both constants live in app.routing.constants — see that file for
-the placeholder values and the note that they should be re-tuned (Phase 7)
+  Why v1 was broken: v1 had ONE node per stop_id, so five different
+  routes calling at the same stop were all edges touching the same node.
+  Dijkstra could hop from any route's edge to any other route's edge at
+  that node for free — nothing in the graph distinguished "the bus I'm
+  currently riding" from "a bus that happens to stop here too." Bumping
+  TRANSFER_PENALTY did nothing because that constant only applied to the
+  separate walking-transfer edges between different nearby stops, never
+  to a same-stop route switch (which had no edge, and therefore no cost,
+  at all). v2 forces every route switch — same-stop or nearby-stop —
+  through an explicit board edge, so the penalty is now unavoidable and
+  actually shapes the shortest path.
+
+Both constants live in app.routing.constants — see that file for the
+placeholder values and the note that they should be re-tuned (Phase 7)
 against real Kathmandu interchange measurements before this goes to prod.
 """
 
@@ -43,55 +63,67 @@ def haversine_distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> 
     return 2 * EARTH_RADIUS * math.asin(math.sqrt(a))
 
 
+def _ride_node(stop_id: str, route_id: str) -> tuple[str, str]:
+    return (stop_id, route_id)
+
+
 def build_graph(session: Session) -> nx.DiGraph:
     graph = nx.DiGraph()
     routes = get_active_routes(session)
 
     stop_coords: dict[str, tuple[float, float]] = {}
-    stop_routes: dict[str, set[str]] = {}
 
     for route in routes:
-        ordered = sorted(route.route_stops, key=lambda rs: rs.sequence_no)
+        ordered = [rs for rs in sorted(route.route_stops, key=lambda rs: rs.sequence_no) if rs.stop is not None]
 
         for rs in ordered:
             stop = rs.stop
-            if stop is None:
-                continue
+
             if stop.stop_id not in graph:
-                graph.add_node(stop.stop_id, lat=stop.lat, lng=stop.lng, stop_name=stop.stop_name)
+                graph.add_node(
+                    stop.stop_id, lat=stop.lat, lng=stop.lng, stop_name=stop.stop_name, kind="physical"
+                )
                 stop_coords[stop.stop_id] = (stop.lat, stop.lng)
-            stop_routes.setdefault(stop.stop_id, set()).add(route.route_id)
+
+            ride_node = _ride_node(stop.stop_id, route.route_id)
+            if ride_node not in graph:
+                graph.add_node(
+                    ride_node, lat=stop.lat, lng=stop.lng, stop_name=stop.stop_name, kind="ride"
+                )
+                graph.add_edge(
+                    stop.stop_id, ride_node,
+                    weight=TRANSFER_PENALTY, distance_m=0, route_id=route.route_id,
+                    kind="board", is_transfer=False,
+                )
+                graph.add_edge(
+                    ride_node, stop.stop_id,
+                    weight=0, distance_m=0, route_id=route.route_id,
+                    kind="alight", is_transfer=False,
+                )
 
         for a, b in zip(ordered, ordered[1:]):
-            if a.stop is None or b.stop is None:
-                continue
             dist = haversine_distance_m(a.stop.lat, a.stop.lng, b.stop.lat, b.stop.lng)
-            graph.add_edge(a.stop_id, b.stop_id, weight=dist, route_id=route.route_id, is_transfer=False)
+            node_a = _ride_node(a.stop_id, route.route_id)
+            node_b = _ride_node(b.stop_id, route.route_id)
+            graph.add_edge(node_a, node_b, weight=dist, distance_m=dist, route_id=route.route_id, kind="ride", is_transfer=False)
             if route.is_bidirectional:
-                graph.add_edge(b.stop_id, a.stop_id, weight=dist, route_id=route.route_id, is_transfer=False)
+                graph.add_edge(node_b, node_a, weight=dist, distance_m=dist, route_id=route.route_id, kind="ride", is_transfer=False)
 
-    # Interchange / transfer edges: stops on different routes within walking
-    # distance of each other. O(n^2) over stops actually used by active
-    # routes (hundreds, not thousands) — fine for this dataset's size; a
-    # spatial index (e.g. a KD-tree) would be the Phase-7 upgrade if the
-    # stop count grows a lot.
+    # Walking transfer edges between distinct nearby physical stops. Board
+    # edges (added above) already carry TRANSFER_PENALTY, so this edge is
+    # priced at pure walking distance only — no double-penalizing.
     stop_ids = list(stop_coords.keys())
     for i, sid_a in enumerate(stop_ids):
         lat_a, lng_a = stop_coords[sid_a]
         for sid_b in stop_ids[i + 1:]:
             lat_b, lng_b = stop_coords[sid_b]
-            # cheap prefilter before the trig-heavy haversine call
             if abs(lat_a - lat_b) > 0.01 or abs(lng_a - lng_b) > 0.01:
                 continue
             dist = haversine_distance_m(lat_a, lng_a, lat_b, lng_b)
             if dist > INTERCHANGE_DISTANCE:
                 continue
-            if stop_routes[sid_a] == stop_routes[sid_b]:
-                # Same route(s) already connect these stops directly.
-                continue
-            weight = dist + TRANSFER_PENALTY
-            graph.add_edge(sid_a, sid_b, weight=weight, route_id=None, is_transfer=True)
-            graph.add_edge(sid_b, sid_a, weight=weight, route_id=None, is_transfer=True)
+            graph.add_edge(sid_a, sid_b, weight=dist, distance_m=dist, route_id=None, kind="walk", is_transfer=True)
+            graph.add_edge(sid_b, sid_a, weight=dist, distance_m=dist, route_id=None, kind="walk", is_transfer=True)
 
     return graph
 
