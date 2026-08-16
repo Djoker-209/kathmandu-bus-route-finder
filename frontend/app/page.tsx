@@ -1,46 +1,75 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import SearchForm from "@/components/SearchForm";
-import { getMockStops, getMockRouteResult, getMockNoRouteResult } from "@/lib/mockRoute";
-import { RouteSearchResult } from "@/types/route";
+import { RouteSearchResult, Stop } from "@/types/route";
 
 // Leaflet touches `window`, so the map must load client-side only.
 const BusMap = dynamic(() => import("@/components/BusMap"), { ssr: false });
 
-const stops = getMockStops();
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 export default function Home() {
+  const [stops, setStops] = useState<Stop[]>([]);
   const [result, setResult] = useState<RouteSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Load the full stop list for the autocomplete datalist, paging through
+  // /stops since `limit` is capped server-side by settings.MAX_PAGE_SIZE.
+  useEffect(() => {
+    async function loadStops() {
+      try {
+        const all: Stop[] = [];
+        let offset = 0;
+        const pageSize = 100; // stays under MAX_PAGE_SIZE regardless of its exact value
+
+        while (true) {
+          const res = await fetch(`${API_BASE}/stops?limit=${pageSize}&offset=${offset}`);
+          if (!res.ok) break;
+          const data: { total: number; items: Stop[] } = await res.json();
+          all.push(...data.items);
+          offset += pageSize;
+          if (offset >= data.total || data.items.length === 0) break;
+        }
+
+        setStops(all);
+      } catch {
+        // Non-fatal: the search form still works, just without suggestions.
+      }
+    }
+    loadStops();
+  }, []);
+
   async function handleSearch(originId: string, destinationId: string) {
     setLoading(true);
     setError(null);
+    setResult(null);
 
-    // --- MOCK BLOCK: replace this whole block with a real fetch once the
-    // backend is live, e.g.:
-    //
-    // const res = await fetch("/api/route/search", {
-    //   method: "POST",
-    //   headers: { "Content-Type": "application/json" },
-    //   body: JSON.stringify({ origin: originId, destination: destinationId }),
-    // });
-    // if (!res.ok) { setError("Something went wrong. Try again."); setLoading(false); return; }
-    // const data: RouteSearchResult = await res.json();
     try {
-      await new Promise((r) => setTimeout(r, 400)); // simulate network latency
-      const sameStop = originId.trim().toLowerCase() === destinationId.trim().toLowerCase();
-      const data = sameStop ? getMockNoRouteResult() : getMockRouteResult();
-      setResult(data);
+      const params = new URLSearchParams({
+        origin: originId,
+        destination: destinationId,
+      });
+      const res = await fetch(`${API_BASE}/route-finder?${params.toString()}`);
+
+      if (res.status === 404) {
+        setResult({ found: false });
+        return;
+      }
+      if (!res.ok) {
+        setError("Something went wrong. Try again.");
+        return;
+      }
+
+      const data = await res.json();
+      setResult({ found: true, ...data });
     } catch {
       setError("Something went wrong. Try again.");
     } finally {
       setLoading(false);
     }
-    // --- END MOCK BLOCK
   }
 
   return (
@@ -71,13 +100,14 @@ export default function Home() {
           <div className="flex flex-col gap-2 text-sm">
             <p className="text-neutral-400">
               {result.transfer_count === 0 ? "Direct route" : `${result.transfer_count} transfer`}
-              {result.total_distance_km ? ` · ${result.total_distance_km} km` : ""}
+              {" · "}
+              {(result.total_cost / 1000).toFixed(1)} km
             </p>
-            {result.legs.map((leg) => (
-              <div key={leg.route_id} className="bg-route-panel rounded-md px-3 py-2">
+            {result.legs.map((leg, i) => (
+              <div key={`${leg.route_id}-${i}`} className="bg-route-panel rounded-md px-3 py-2">
                 <p className="font-medium">{leg.route_name}</p>
                 <p className="text-neutral-400">
-                  {leg.from_stop.name} → {leg.to_stop.name}
+                  {leg.board_stop.stop_name} → {leg.alight_stop.stop_name}
                 </p>
               </div>
             ))}
@@ -86,7 +116,7 @@ export default function Home() {
       </aside>
 
       <div className="flex-1">
-        <BusMap result={result} />
+        <BusMap key="bus-map" result={result} />
       </div>
     </main>
   );

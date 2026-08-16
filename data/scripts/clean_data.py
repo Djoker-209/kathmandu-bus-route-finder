@@ -54,6 +54,11 @@ UTC_NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 # fall outside the expected area (geo_out_of_bounds), not to reject them.
 VALLEY_BBOX = {"lat_min": 27.55, "lat_max": 27.85, "lng_min": 85.15, "lng_max": 85.55}
 
+# Routes whose name indicates a one-way loop/circuit — these should never
+# be defaulted to bidirectional, since reversing their stop sequence
+# wouldn't represent a real return trip along the same streets.
+LOOP_KEYWORDS = ("loop", "parikrama")
+
 
 @dataclass
 class CleaningStats:
@@ -517,6 +522,33 @@ def clean_routes(
     return df
 
 
+def apply_default_bidirectional_and_status(routes: pd.DataFrame) -> pd.DataFrame:
+    """Default every non-loop route to is_bidirectional=True and every
+    route to status='active'. This is a deliberate operational decision
+    made after manually reviewing the dataset — most routes here are
+    genuinely two-way corridors even though the raw data models each
+    direction as (or lacks) a separate one-way entry, and pending_release
+    was blocking working routes from ever being used by the app. Loop/
+    circuit routes (see LOOP_KEYWORDS) are excluded from the bidirectional
+    default since their stop sequence only makes sense in one direction.
+
+    This intentionally overrides the more conservative per-pair
+    confirmation flow in dedup_routes() (which only sets is_bidirectional
+    via route_dedup_overrides.yaml) and skips the return-leg verification
+    gate implied by status_original/status_corrected_for_return_leg. If a
+    dataset later needs any given route to actually stay pending_release
+    or one-way, exclude it here explicitly rather than relying on that
+    stricter per-pair mechanism to catch it.
+    """
+    df = routes.copy()
+    is_loop = df["route_name"].str.lower().str.contains(
+        "|".join(LOOP_KEYWORDS), regex=True, na=False
+    )
+    df.loc[~is_loop, "is_bidirectional"] = True
+    df["status"] = "active"
+    return df
+
+
 def verify(
     routes: pd.DataFrame,
     stops: pd.DataFrame,
@@ -606,10 +638,17 @@ def write_report(stats: CleaningStats, out_path: Path) -> None:
         )
     lines.append("")
 
-    lines.append("## 3. routes.start_stop_id / end_stop_id / total_stops recomputation")
+    lines.append("## 3a. routes.start_stop_id / end_stop_id / total_stops recomputation")
     lines.append(f"- start_stop_id corrected: {len(stats.start_stop_corrected)} -> {stats.start_stop_corrected}")
     lines.append(f"- end_stop_id corrected:   {len(stats.end_stop_corrected)} -> {stats.end_stop_corrected}")
     lines.append(f"- total_stops corrected:   {len(stats.total_stops_corrected)} -> {stats.total_stops_corrected}")
+    lines.append("")
+
+    lines.append("## 3b. Default bidirectional/status override")
+    lines.append(
+    "- All non-loop routes forced to is_bidirectional=True; all routes forced to status='active'. "
+    "See apply_default_bidirectional_and_status() docstring for why."
+    )
     lines.append("")
 
     lines.append("## 4. routes.operator_id orphan references")
@@ -683,6 +722,7 @@ def main() -> int:
     )
 
     routes = clean_routes(routes_raw, route_stops, stops, operators, route_operators, stats)
+    routes = apply_default_bidirectional_and_status(routes)
 
     stats.rows_after["operators.csv"] = len(operators)
     stats.rows_after["stops.csv"] = len(stops)

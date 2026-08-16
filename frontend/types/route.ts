@@ -1,32 +1,48 @@
-// Shapes here are a proposed contract for /route/search — confirm the exact
-// field names with Janak/Dipesh before backend work starts, then update this
-// file to match their Pydantic schemas exactly.
+// Mirrors backend/app/schemas.py exactly. Keep in sync if the backend changes.
 
 export interface Stop {
-  id: string;
-  name: string;
+  stop_id: string;
+  stop_name: string;
   lat: number;
   lng: number;
+  zone?: string | null;
+  district?: string | null;
+  is_major_stop: boolean;
+  is_interchange: boolean;
+  status: string;
+}
+
+export interface RoadGeometry {
+  // GeoJSON LineString: coordinates are [lng, lat] pairs, per GeoJSON spec.
+  // Convert to [lat, lng] before handing to Leaflet.
+  geometry: {
+    type: "LineString";
+    coordinates: [number, number][];
+  };
+  distance_m: number;
+  duration_s: number;
 }
 
 export interface RouteLeg {
   route_id: string;
   route_name: string;
-  from_stop: Stop;
-  to_stop: Stop;
-  // Ordered polyline points for this leg (straight-line stop sequence;
-  // OSRM will later replace this with a road-following path).
-  path: [number, number][]; // [lat, lng][]
+  board_stop: Stop;
+  alight_stop: Stop;
+  num_stops: number;
+  stops: Stop[]; // every physical stop on this leg, in order, board→alight inclusive
+  road_geometry?: RoadGeometry | null;
 }
 
-export interface RouteSearchResult {
-  found: boolean;
-  transfer_count: number; // 0 = direct, 1 = single transfer
-  total_distance_km?: number;
+export interface RouteFinderResult {
+  origin_stop_id: string;
+  destination_stop_id: string;
+  total_cost: number;
+  transfer_count: number;
   legs: RouteLeg[];
 }
 
-export interface RouteSearchRequest {
-  origin: string; // stop id or free-text, TBD with backend
-  destination: string;
-}
+// Frontend-only wrapper: the backend signals "not found" via HTTP 404,
+// not a `found` field, so we add it client-side after the fetch.
+export type RouteSearchResult =
+  | ({ found: true } & RouteFinderResult)
+  | { found: false };

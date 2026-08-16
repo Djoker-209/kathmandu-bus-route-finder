@@ -10,13 +10,29 @@ interface SearchFormProps {
 }
 
 export default function SearchForm({ stops, onSearch, loading }: SearchFormProps) {
-  const [origin, setOrigin] = useState("");
-  const [destination, setDestination] = useState("");
+  const [originText, setOriginText] = useState("");
+  const [destinationText, setDestinationText] = useState("");
+
+  function resolveStopId(typedName: string): string | null {
+    const match = stops.find(
+      (s) => s.stop_name.trim().toLowerCase() === typedName.trim().toLowerCase()
+    );
+    return match?.stop_id ?? null;
+  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!origin || !destination) return;
-    onSearch(origin, destination);
+    const originId = resolveStopId(originText);
+    const destinationId = resolveStopId(destinationText);
+
+    if (!originId || !destinationId) {
+      // TODO: surface a proper inline error instead of a native alert
+      // once the stop list is confirmed working end-to-end.
+      alert("Please pick a valid stop from the suggestions for both fields.");
+      return;
+    }
+
+    onSearch(originId, destinationId);
   }
 
   return (
@@ -28,8 +44,8 @@ export default function SearchForm({ stops, onSearch, loading }: SearchFormProps
         <input
           id="origin"
           list="stop-options"
-          value={origin}
-          onChange={(e) => setOrigin(e.target.value)}
+          value={originText}
+          onChange={(e) => setOriginText(e.target.value)}
           placeholder="Origin stop"
           className="rounded-md bg-route-bg border border-route-line px-3 py-2 text-sm outline-none focus:border-route-accent"
         />
@@ -42,18 +58,18 @@ export default function SearchForm({ stops, onSearch, loading }: SearchFormProps
         <input
           id="destination"
           list="stop-options"
-          value={destination}
-          onChange={(e) => setDestination(e.target.value)}
+          value={destinationText}
+          onChange={(e) => setDestinationText(e.target.value)}
           placeholder="Destination stop"
           className="rounded-md bg-route-bg border border-route-line px-3 py-2 text-sm outline-none focus:border-route-accent"
         />
       </div>
 
-      {/* Real autocomplete (fuzzy match, /stops/nearest) replaces this datalist
-          once the backend endpoint exists. */}
+      {/* Fine for small stop counts. If the full stop list is large,
+          swap this for a debounced /stops?search= call instead. */}
       <datalist id="stop-options">
         {stops.map((s) => (
-          <option key={s.id} value={s.name} />
+          <option key={s.stop_id} value={s.stop_name} />
         ))}
       </datalist>
 
