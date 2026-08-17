@@ -59,6 +59,12 @@ VALLEY_BBOX = {"lat_min": 27.55, "lat_max": 27.85, "lng_min": 85.15, "lng_max": 
 # wouldn't represent a real return trip along the same streets.
 LOOP_KEYWORDS = ("loop", "parikrama")
 
+# Backtrack distance (meters) below which a revisited stop is flagged as a
+# LIKELY splice artifact rather than a genuine loop/return-leg. This is a
+# heuristic hint for the report only — it never auto-drops anything on its
+# own. See resolve_revisits().
+REVISIT_BACKTRACK_SUSPECT_M = 400
+
 
 @dataclass
 class CleaningStats:
@@ -86,7 +92,12 @@ class CleaningStats:
     stop_dedup_pending_review: list[list[str]] = field(default_factory=list)
     route_dedup_candidates: list[dict] = field(default_factory=list)
     route_dedup_pending_review: list[dict] = field(default_factory=list)
-
+    # --- return-leg / revisit resolution (new) ---
+    revisit_candidates: list[dict] = field(default_factory=list)
+    revisit_confirmed_dropped_rows: int = 0
+    revisit_confirmed_kept_routes: list[str] = field(default_factory=list)
+    revisit_confirmed_collapsed_routes: list[str] = field(default_factory=list)
+    revisit_pending_review: list[dict] = field(default_factory=list)
 
 
 def _normalize_stop_name(name: str) -> str:
@@ -313,6 +324,128 @@ def dedup_routes(
     return routes.reset_index(drop=True), route_stops.reset_index(drop=True), route_operators.reset_index(drop=True), dropped_route_ids
 
 
+def resolve_revisits(
+    route_stops: pd.DataFrame,
+    stops: pd.DataFrame,
+    stats: CleaningStats,
+    overrides_path: Path | None = None,
+) -> pd.DataFrame:
+    """Resolve route_stops rows that revisit a stop_id already used earlier
+    in the same route.
+
+    A revisit can be either:
+      (a) a genuine loop / return-leg route where the sequence legitimately
+          passes the same physical stop twice, or
+      (b) a data-splice artifact (e.g. outbound + return-leg source rows
+          concatenated during raw data assembly), which shows up as
+          A -> B -> A with B a nearby-but-distinct stop and a short
+          backtrack distance.
+
+    Geometry alone can't reliably tell these apart — see report.md history
+    (Buddhanagar Stop / Jadibuti / Gopi Krishna Stop cases, all also present
+    in return_leg_verification_priority_production_fixed.csv with
+    return_leg_verified=False). So, mirroring dedup_stops()/dedup_routes():
+    every route with a revisit is recorded as a *candidate*, annotated with
+    a backtrack-distance hint, but ONLY routes confirmed in overrides_path
+    (return_leg_overrides.yaml, verdict: drop_repeats) actually get rows
+    removed. Routes confirmed verdict: keep are left untouched and recorded
+    as confirmed. Anything not yet in the overrides file is left untouched
+    AND surfaced in revisit_pending_review so it doesn't silently pass
+    through as "assumed fine."
+    """
+    df = route_stops.sort_values(["route_id", "sequence_no"]).reset_index(drop=True)
+    stop_coords = stops.set_index("stop_id")[["lat", "lng"]]
+
+    candidates: list[dict] = []
+    for route_id, grp in df.groupby("route_id"):
+        grp = grp.reset_index(drop=True)
+        ids = grp["stop_id"].tolist()
+        seen: dict[str, int] = {}
+        dup_positions: dict[str, list[int]] = {}
+        for i, sid in enumerate(ids):
+            if sid in seen:
+                dup_positions.setdefault(sid, [seen[sid]]).append(i)
+            else:
+                seen[sid] = i
+        for sid, positions in dup_positions.items():
+            first_idx, second_idx = positions[0], positions[1]
+            bridge_sid = ids[second_idx - 1] if second_idx - 1 != first_idx else None
+            backtrack_m = None
+            if bridge_sid and sid in stop_coords.index and bridge_sid in stop_coords.index:
+                a, b = stop_coords.loc[sid], stop_coords.loc[bridge_sid]
+                backtrack_m = round(haversine_km(a["lat"], a["lng"], b["lat"], b["lng"]) * 1000, 1)
+            candidates.append({
+                "route_id": route_id,
+                "stop_id": sid,
+                "sequence_positions": [int(grp.at[p, "sequence_no"]) for p in positions],
+                "bridge_stop_id": bridge_sid,
+                "backtrack_m": backtrack_m,
+                "suspect": backtrack_m is not None and backtrack_m < REVISIT_BACKTRACK_SUSPECT_M,
+            })
+
+    stats.revisit_candidates = candidates
+    revisited_routes = sorted({c["route_id"] for c in candidates})
+
+    verdicts: dict[str, str] = {}  # route_id -> "keep" | "drop_repeats"
+    if overrides_path and overrides_path.exists():
+        import yaml
+        with open(overrides_path) as f:
+            data = yaml.safe_load(f) or {}
+        for entry in data.get("routes", []):
+            rid = entry.get("route_id")
+            verdict = entry.get("verdict")
+            if rid and verdict in ("keep", "drop_repeats"):
+                verdicts[rid] = verdict
+            elif rid:
+                log.warning(
+                    "return_leg_overrides.yaml: route %s has unrecognized verdict %r — ignored",
+                    rid, verdict,
+                )
+
+    drop_row_mask = pd.Series(False, index=df.index)
+    for route_id in revisited_routes:
+        verdict = verdicts.get(route_id)
+        if verdict == "keep":
+            stats.revisit_confirmed_kept_routes.append(route_id)
+            continue
+        if verdict == "drop_repeats":
+            route_mask = df["route_id"] == route_id
+            sub = df[route_mask]
+            ids = sub["stop_id"]
+            later_dupe_mask = route_mask & df["stop_id"].isin(ids[ids.duplicated()].unique()) & df.duplicated(subset=["route_id", "stop_id"], keep="first")
+            drop_row_mask |= later_dupe_mask
+            stats.revisit_confirmed_collapsed_routes.append(route_id)
+            continue
+        # No confirmed verdict yet — leave rows untouched, but surface it.
+        stats.revisit_pending_review.append({
+            "route_id": route_id,
+            "revisits": [c for c in candidates if c["route_id"] == route_id],
+        })
+
+    if stats.revisit_pending_review:
+        log.info(
+            "%d route(s) have unresolved stop revisits — needs human review, "
+            "see report.md and add verdicts to %s",
+            len(stats.revisit_pending_review), overrides_path,
+        )
+
+    stats.revisit_confirmed_dropped_rows = int(drop_row_mask.sum())
+    df = df[~drop_row_mask].copy()
+
+    # Re-sequence 1..N per route after any drops, preserving relative order.
+    df = df.sort_values(["route_id", "sequence_no"])
+    df["sequence_no"] = df.groupby("route_id").cumcount() + 1
+
+    # Informational: revisits still present after resolution (i.e. confirmed
+    # "keep" routes, or unresolved ones left untouched pending review).
+    remaining = df.groupby(["route_id", "stop_id"]).size()
+    remaining = remaining[remaining > 1]
+    stats.revisit_rows = int((remaining - 1).sum())
+    stats.revisit_routes = int(remaining.index.get_level_values("route_id").nunique()) if len(remaining) else 0
+
+    return df.reset_index(drop=True)
+
+
 def load_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
@@ -369,9 +502,13 @@ def clean_stops(stops: pd.DataFrame) -> pd.DataFrame:
 
 
 def clean_route_stops(
-    route_stops: pd.DataFrame, stops: pd.DataFrame, stats: CleaningStats
+    route_stops: pd.DataFrame,
+    stops: pd.DataFrame,
+    stats: CleaningStats,
+    revisit_overrides_path: Path | None = None,
 ) -> pd.DataFrame:
-    """Remove orphan (route_id, stop_id) pairs and re-sequence per route."""
+    """Remove orphan (route_id, stop_id) pairs, re-sequence per route, then
+    resolve revisited stops via resolve_revisits() (see its docstring)."""
     df = route_stops.copy()
     df["sequence_no"] = pd.to_numeric(df["sequence_no"], errors="raise").astype(int)
 
@@ -398,11 +535,9 @@ def clean_route_stops(
     df["sequence_no"] = df.groupby("route_id").cumcount() + 1
     stats.resequenced_routes = df["route_id"].nunique()
 
-    # Informational only: stops revisited within the same route (loops/return legs).
-    revisits = df.groupby(["route_id", "stop_id"]).size()
-    revisits = revisits[revisits > 1]
-    stats.revisit_rows = int((revisits - 1).sum())  # extra occurrences beyond the first
-    stats.revisit_routes = int(revisits.index.get_level_values("route_id").nunique())
+    # Resolve revisits (confirmed drop_repeats / keep / pending review).
+    # This re-sequences again internally after any drops.
+    df = resolve_revisits(df, stops, stats, overrides_path=revisit_overrides_path)
 
     return df.reset_index(drop=True)
 
@@ -638,6 +773,29 @@ def write_report(stats: CleaningStats, out_path: Path) -> None:
         )
     lines.append("")
 
+    lines.append("## 2d. Revisited-stop resolution (return-leg / splice candidates)")
+    lines.append(
+        f"- Candidate (route, stop_id) revisit pairs found: {len(stats.revisit_candidates)} "
+        f"across {len({c['route_id'] for c in stats.revisit_candidates})} route(s)"
+    )
+    lines.append(f"- Rows dropped (human-confirmed verdict: drop_repeats): {stats.revisit_confirmed_dropped_rows}")
+    if stats.revisit_confirmed_collapsed_routes:
+        lines.append(f"    - routes collapsed to first occurrence: {stats.revisit_confirmed_collapsed_routes}")
+    if stats.revisit_confirmed_kept_routes:
+        lines.append(f"- Routes confirmed as genuine loop/return-leg (verdict: keep): {stats.revisit_confirmed_kept_routes}")
+    lines.append(f"- Routes PENDING human review (no verdict yet, left untouched): {len(stats.revisit_pending_review)}")
+    if stats.revisit_pending_review:
+        lines.append("  Add a verdict (keep / drop_repeats) to data/scripts/return_leg_overrides.yaml.")
+        lines.append("  Cross-check against return_leg_verification_priority_production_fixed.csv.")
+        for entry in stats.revisit_pending_review:
+            for r in entry["revisits"]:
+                suspect_note = " [SUSPECT — short backtrack, likely splice artifact]" if r["suspect"] else ""
+                lines.append(
+                    f"    - {entry['route_id']}: {r['stop_id']} at seq {r['sequence_positions']}, "
+                    f"bridge stop {r['bridge_stop_id']}, backtrack {r['backtrack_m']}m{suspect_note}"
+                )
+    lines.append("")
+
     lines.append("## 3a. routes.start_stop_id / end_stop_id / total_stops recomputation")
     lines.append(f"- start_stop_id corrected: {len(stats.start_stop_corrected)} -> {stats.start_stop_corrected}")
     lines.append(f"- end_stop_id corrected:   {len(stats.end_stop_corrected)} -> {stats.end_stop_corrected}")
@@ -665,11 +823,12 @@ def write_report(stats: CleaningStats, out_path: Path) -> None:
         lines.append(f"- {name}: {count}")
     lines.append("")
 
-    lines.append("## 7. Note — revisited stops (informational only, not modified)")
+    lines.append("## 7. Note — revisited stops remaining after resolution (informational)")
     lines.append(
-        f"- {stats.revisit_rows} route_stops rows revisit a stop_id already used earlier "
-        f"in the same route, across {stats.revisit_routes} routes — consistent with "
-        f"loop/return-leg routes. Left untouched."
+        f"- {stats.revisit_rows} route_stops rows still revisit a stop_id already used earlier "
+        f"in the same route, across {stats.revisit_routes} routes, after applying confirmed "
+        f"verdicts above. These are either confirmed genuine loops (verdict: keep) or still "
+        f"pending human review — see section 2d."
     )
 
     out_path.write_text("\n".join(lines), encoding="utf-8")
@@ -714,7 +873,10 @@ def main() -> int:
     stops, stop_id_remap = dedup_stops(stops, stats, overrides_path=Path("data/scripts/stop_dedup_overrides.yaml"))
     route_stops_raw = remap_stop_ids(route_stops_raw, stop_id_remap)
 
-    route_stops = clean_route_stops(route_stops_raw, stops, stats)
+    route_stops = clean_route_stops(
+        route_stops_raw, stops, stats,
+        revisit_overrides_path=Path("data/scripts/return_leg_overrides.yaml"),
+    )
 
     routes_raw, route_stops, route_operators, dropped_route_ids = dedup_routes(
         routes_raw, route_stops, route_operators, stats,

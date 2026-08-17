@@ -1,6 +1,6 @@
 confirmed_merges:
   - keep: S0069
-    drop: [S0074]
+    drop: [S0074, S0091, S0114]
 
   - keep: S0069
     drop: [S0091]

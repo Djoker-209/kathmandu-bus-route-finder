@@ -1,0 +1,156 @@
+--- a/backend/app/routing/pathfinder.py
++++ b/backend/app/routing/pathfinder.py
+@@ -12,6 +12,13 @@
+ an accurate transfer_count (each board after the first is a transfer,
+ whether it happened after walking to a new stop or switching routes at
+ the same stop).
++
++RouteFinderResult.stop_sequence is the flattened physical-stop view of
++the same path — every stop_id actually visited, in order, with ride nodes
++collapsed to their physical stop_id and consecutive duplicates removed.
++Useful for quick assertions/logging where you want "what stops did this
++touch" without walking segments and re-deriving it from from_stop_id/
++to_stop_id pairs.
+ """
+ 
+ from dataclasses import dataclass
+@@ -41,6 +48,13 @@
+     segments: List[PathSegment]
+     total_distance_m: float
+     transfer_count: int
++    # Every physical stop_id actually visited, in travel order, board and
++    # alight stops included, ride nodes collapsed down to their physical
++    # stop_id. Derived from the raw nx path, not from `segments` — a rider
++    # standing at a stop is the same place whether they got there by
++    # boarding, alighting, or walking, so consecutive duplicates (e.g. the
++    # physical node right before its own board edge) are collapsed.
++    stop_sequence: List[str]
+ 
+ 
+ def find_shortest_path(
+@@ -62,6 +76,12 @@
+             f"No route found between '{origin_stop_id}' and '{destination_stop_id}'"
+         ) from exc
+ 
++    stop_sequence: list[str] = []
++    for node in path:
++        physical_id = node if isinstance(node, str) else node[0]
++        if not stop_sequence or stop_sequence[-1] != physical_id:
++            stop_sequence.append(physical_id)
++
+     segments: list[PathSegment] = []
+     board_count = 0
+     total_distance_m = 0.0
+@@ -99,4 +119,5 @@
+         segments=segments,
+         total_distance_m=total_distance_m,
+         transfer_count=max(board_count - 1, 0),
++        stop_sequence=stop_sequence,
+     )
+--- a/backend/tests/test_routing.py
++++ b/backend/tests/test_routing.py
+@@ -77,11 +77,21 @@
+ 
+ 
+ def test_route_edges_are_bidirectional_when_flagged(two_route_network):
++    """v2 note: 'riding' is an edge between RIDE nodes (stop_id, route_id),
++    not between the bare physical stop_id nodes -- see graph_builder.py's
++    module docstring for why (v1's flat model let Dijkstra switch routes
++    at a shared stop for free). Physical stop_id nodes only connect to
++    each other via board/alight/walk edges."""
+     graph = gb.build_graph(session=None)
+-    assert graph.has_edge("S1", "S2")
+-    assert graph.has_edge("S2", "S1")  # is_bidirectional=True on Route A
+-    assert graph["S1"]["S2"]["route_id"] == "R_A"
+-    assert graph["S1"]["S2"]["is_transfer"] is False
++    node_s1 = ("S1", "R_A")
++    node_s2 = ("S2", "R_A")
++    assert graph.has_edge(node_s1, node_s2)
++    assert graph.has_edge(node_s2, node_s1)  # is_bidirectional=True on Route A
++    assert graph[node_s1][node_s2]["route_id"] == "R_A"
++    assert graph[node_s1][node_s2]["kind"] == "ride"
++    assert graph[node_s1][node_s2]["is_transfer"] is False
++    # and confirm there is NOT a direct physical-to-physical ride shortcut
++    assert not graph.has_edge("S1", "S2")
+ 
+ 
+ def test_route_edges_one_directional_when_not_bidirectional(monkeypatch):
+@@ -91,31 +101,64 @@
+     monkeypatch.setattr(gb, "get_active_routes", lambda session: [route])
+ 
+     graph = gb.build_graph(session=None)
+-    assert graph.has_edge("S1", "S2")
+-    assert not graph.has_edge("S2", "S1")
++    node_s1 = ("S1", "R_ONE_WAY")
++    node_s2 = ("S2", "R_ONE_WAY")
++    assert graph.has_edge(node_s1, node_s2)
++    assert not graph.has_edge(node_s2, node_s1)
+ 
+ 
+ def test_transfer_edge_created_between_close_stops_on_different_routes(two_route_network):
+-    graph = gb.build_graph(session=None)
+-    assert graph.has_edge("S2", "S5")
+-    edge = graph["S2"]["S5"]
+-    assert edge["is_transfer"] is True
+-    assert edge["route_id"] is None
+-    # weight must include the transfer penalty on top of the real walking distance
++    """v2 note: TRANSFER_PENALTY no longer lives on the walk edge -- it
++    moved to the board edge on the far side (see graph_builder.py's
++    module docstring on why: it needs to apply to same-stop route
++    switches too, which have no walk edge at all). So the walk edge here
++    should carry only the real walking distance, and the penalty should
++    show up separately on the board edge into route B at S5."""
+     from app.routing.constants import TRANSFER_PENALTY
+-    assert edge["weight"] > TRANSFER_PENALTY
+-
+ 
+-def test_no_transfer_edge_between_stops_already_sharing_a_route(monkeypatch):
+-    """Two stops 5m apart but on the SAME route shouldn't get a redundant transfer edge."""
++    graph = gb.build_graph(session=None)
++    assert graph.has_edge("S2", "S5")
++    walk_edge = graph["S2"]["S5"]
++    assert walk_edge["is_transfer"] is True
++    assert walk_edge["route_id"] is None
++    assert walk_edge["kind"] == "walk"
++    assert walk_edge["weight"] < TRANSFER_PENALTY  # pure walking distance, ~6m here
++
++    board_edge = graph["S5"][("S5", "R_B")]
++    assert board_edge["kind"] == "board"
++    assert board_edge["weight"] == TRANSFER_PENALTY
++
++
++def test_walk_edge_still_created_between_close_stops_on_the_same_route(monkeypatch):
++    """v1 suppressed a walk/transfer edge between two stops that already
++    share a route. v2 does NOT: build_graph() adds a walk edge between
++    any two distinct physical stops within INTERCHANGE_DISTANCE, with no
++    same-route check. That's a deliberate simplification, not something
++    this test is trying to prove correct -- it's here so that if a future
++    change reintroduces the v1 suppression (or removes it further), the
++    diff is visible instead of silent.
++
++    Known consequence worth revisiting: on a route whose stops loop back
++    near themselves, this can make the pathfinder choose to walk a
++    straight-line shortcut between two stops on the SAME route instead of
++    riding the bus between them, since walk edges are priced on raw
++    haversine distance with no real pedestrian-path check (no rivers,
++    walls, one-way alleys, etc. factored in)."""
+     s1 = make_stop("S1", "A", 27.70, 85.31)
+     s2 = make_stop("S2", "B", 27.70004, 85.31004)  # ~5m from s1
+     route = make_route("R_A", [s1, s2])
+     monkeypatch.setattr(gb, "get_active_routes", lambda session: [route])
+ 
+     graph = gb.build_graph(session=None)
+-    edge = graph["S1"]["S2"]
+-    assert edge["is_transfer"] is False  # it's the direct route edge, not a transfer
++
++    # the real ride edge (between ride nodes) is unaffected -- not a transfer
++    ride_edge = graph[("S1", "R_A")][("S2", "R_A")]
++    assert ride_edge["is_transfer"] is False
++
++    # ...but a redundant walk edge between the physical stops exists too
++    assert graph.has_edge("S1", "S2")
++    assert graph["S1"]["S2"]["is_transfer"] is True
++    assert graph["S1"]["S2"]["kind"] == "walk"
+ 
+ 
+ def test_shortest_path_prefers_direct_route_over_far_transfer(two_route_network):
