@@ -12,6 +12,13 @@ them out of the returned segments, but still counts board edges to get
 an accurate transfer_count (each board after the first is a transfer,
 whether it happened after walking to a new stop or switching routes at
 the same stop).
+
+RouteFinderResult.stop_sequence is the flattened physical-stop view of
+the same path — every stop_id actually visited, in order, with ride nodes
+collapsed to their physical stop_id and consecutive duplicates removed.
+Useful for quick assertions/logging where you want "what stops did this
+touch" without walking segments and re-deriving it from from_stop_id/
+to_stop_id pairs.
 """
 
 from dataclasses import dataclass
@@ -41,6 +48,13 @@ class RouteFinderResult:
     segments: List[PathSegment]
     total_distance_m: float
     transfer_count: int
+    # Every physical stop_id actually visited, in travel order, board and
+    # alight stops included, ride nodes collapsed down to their physical
+    # stop_id. Derived from the raw nx path, not from `segments` — a rider
+    # standing at a stop is the same place whether they got there by
+    # boarding, alighting, or walking, so consecutive duplicates (e.g. the
+    # physical node right before its own board edge) are collapsed.
+    stop_sequence: List[str]
 
 
 def find_shortest_path(
@@ -61,6 +75,12 @@ def find_shortest_path(
         raise NoRouteFoundError(
             f"No route found between '{origin_stop_id}' and '{destination_stop_id}'"
         ) from exc
+
+    stop_sequence: list[str] = []
+    for node in path:
+        physical_id = node if isinstance(node, str) else node[0]
+        if not stop_sequence or stop_sequence[-1] != physical_id:
+            stop_sequence.append(physical_id)
 
     segments: list[PathSegment] = []
     board_count = 0
@@ -99,4 +119,5 @@ def find_shortest_path(
         segments=segments,
         total_distance_m=total_distance_m,
         transfer_count=max(board_count - 1, 0),
+        stop_sequence=stop_sequence,
     )
