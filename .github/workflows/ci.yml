@@ -26,6 +26,10 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      ADMIN_API_KEY: ci-test-admin-key
+      JWT_SECRET_KEY: ci-test-jwt-secret
+      DATABASE_URL: postgresql://ktm_bus:ktm_bus_dev@localhost:5432/ktm_bus_route_finder
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
