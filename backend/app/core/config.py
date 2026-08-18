@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     DEFAULT_PAGE_SIZE: int = 50
     MAX_PAGE_SIZE: int = 200
 
+    # Comma-separated list of allowed CORS origins, e.g.
+    # "https://app.example.com,https://staging.example.com".
+    # Defaults to the local Next.js dev server so `docker compose up`
+    # works out of the box; override in staging/prod via the env var.
+    CORS_ORIGINS: str = "http://localhost:3000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
     # Shared secret checked by require_admin_key (app/core/security.py).
     # No default on purpose -- startup should fail loudly if it's unset.
     admin_api_key: str

@@ -28,7 +28,7 @@ export interface RouteLeg {
   route_name: string;
   board_stop: Stop;
   alight_stop: Stop;
-  num_stops: number;
+  num_ride_segments: number; // count of merged ride segments (hops), not physical stops
   stops: Stop[]; // every physical stop on this leg, in order, board→alight inclusive
   road_geometry?: RoadGeometry | null;
 }

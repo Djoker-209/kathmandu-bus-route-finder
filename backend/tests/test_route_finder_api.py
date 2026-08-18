@@ -78,12 +78,12 @@ def test_route_finder_transfer_count_matches_leg_boundaries(client):
     assert body["transfer_count"] == 5
 
 
-def test_route_finder_leg_num_stops_reflects_consolidated_hops(client):
+def test_route_finder_leg_num_ride_segments_reflects_consolidated_hops(client):
     """
     A consolidated leg spanning multiple raw hops on the same route must
-    report num_stops > 1, and the total across all legs must be
-    internally consistent (each leg's num_stops counts the hops folded
-    into it, not just always 1 as it did pre-fix).
+    report num_ride_segments > 1, and the total across all legs must be
+    internally consistent (each leg's num_ride_segments counts the hops
+    folded into it, not just always 1 as it did pre-fix).
     """
     resp = client.get("/route-finder", params={"origin": "S0044", "destination": "S0275"})
     assert resp.status_code == 200
@@ -92,8 +92,8 @@ def test_route_finder_leg_num_stops_reflects_consolidated_hops(client):
     # First leg on R3232098 covers 4 raw hops (S0044 -> S0087) per the
     # known shape of this path.
     assert legs[0]["route_id"] == "R3232098"
-    assert legs[0]["num_stops"] == 4
+    assert legs[0]["num_ride_segments"] == 4
 
-    # At least one leg must have been consolidated (num_stops > 1) --
+    # At least one leg must have been consolidated (num_ride_segments > 1) --
     # guards against a future regression back to "always 1".
-    assert any(leg["num_stops"] > 1 for leg in legs)
+    assert any(leg["num_ride_segments"] > 1 for leg in legs)

@@ -6,12 +6,29 @@ import SearchForm from "@/components/SearchForm";
 import { RouteSearchResult, Stop } from "@/types/route";
 
 // Leaflet touches `window`, so the map must load client-side only.
-const BusMap = dynamic(() => import("@/components/BusMap"), { ssr: false });
+const BusMap = dynamic(() => import("@/components/BusMap"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full w-full items-center justify-center text-sm text-neutral-500">
+      Loading map…
+    </div>
+  ),
+});
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+function formatDuration(totalSeconds: number): string {
+  const minutes = Math.round(totalSeconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remaining = minutes % 60;
+  return remaining === 0 ? `${hours} hr` : `${hours} hr ${remaining} min`;
+}
+
 export default function Home() {
   const [stops, setStops] = useState<Stop[]>([]);
+  const [stopsLoading, setStopsLoading] = useState(true);
+  const [stopsError, setStopsError] = useState(false);
   const [result, setResult] = useState<RouteSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,7 +44,10 @@ export default function Home() {
 
         while (true) {
           const res = await fetch(`${API_BASE}/stops?limit=${pageSize}&offset=${offset}`);
-          if (!res.ok) break;
+          if (!res.ok) {
+            setStopsError(true);
+            break;
+          }
           const data: { total: number; items: Stop[] } = await res.json();
           all.push(...data.items);
           offset += pageSize;
@@ -36,7 +56,11 @@ export default function Home() {
 
         setStops(all);
       } catch {
-        // Non-fatal: the search form still works, just without suggestions.
+        // Search still works if the user knows a stop_id, but the
+        // autocomplete/"use my location" affordances need this list.
+        setStopsError(true);
+      } finally {
+        setStopsLoading(false);
       }
     }
     loadStops();
@@ -66,15 +90,21 @@ export default function Home() {
       const data = await res.json();
       setResult({ found: true, ...data });
     } catch {
-      setError("Something went wrong. Try again.");
+      setError("Couldn't reach the server. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
   }
 
+  // Only meaningful if every leg has road geometry (OSRM succeeded for all of them).
+  const totalDurationS =
+    result?.found && result.legs.every((leg) => leg.road_geometry)
+      ? result.legs.reduce((sum, leg) => sum + (leg.road_geometry?.duration_s ?? 0), 0)
+      : null;
+
   return (
-    <main className="flex h-screen w-screen">
-      <aside className="w-full max-w-sm flex flex-col gap-4 p-4 overflow-y-auto border-r border-route-line">
+    <main className="flex h-screen w-screen flex-col md:flex-row">
+      <aside className="flex w-full flex-col gap-4 overflow-y-auto border-b border-route-line p-4 md:h-full md:max-w-sm md:border-b-0 md:border-r">
         <div>
           <h1 className="text-lg font-semibold">Kathmandu Bus Route Finder</h1>
           <p className="text-sm text-neutral-400">
@@ -82,42 +112,87 @@ export default function Home() {
           </p>
         </div>
 
-        <SearchForm stops={stops} onSearch={handleSearch} loading={loading} />
+        <SearchForm
+          stops={stops}
+          stopsLoading={stopsLoading}
+          apiBase={API_BASE}
+          onSearch={handleSearch}
+          loading={loading}
+        />
 
-        {error && (
-          <p className="text-sm text-red-400 bg-red-950/40 border border-red-900 rounded-md px-3 py-2">
-            {error}
+        {stopsError && (
+          <p className="rounded-md border border-amber-900 bg-amber-950/40 px-3 py-2 text-sm text-amber-300">
+            Couldn&apos;t load the stop list from the server. You can still search if you know
+            exact stop names, but suggestions won&apos;t be available.
           </p>
         )}
 
-        {result && !result.found && (
-          <p className="text-sm text-neutral-300 bg-route-panel rounded-md px-3 py-2">
-            No direct or single-transfer route found between those stops.
-          </p>
-        )}
-
-        {result && result.found && (
-          <div className="flex flex-col gap-2 text-sm">
-            <p className="text-neutral-400">
-              {result.transfer_count === 0 ? "Direct route" : `${result.transfer_count} transfer`}
-              {" · "}
-              {(result.total_cost / 1000).toFixed(1)} km
+        <div aria-live="polite" className="flex flex-col gap-2">
+          {error && (
+            <p className="rounded-md border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-400">
+              {error}
             </p>
-            {result.legs.map((leg, i) => (
-              <div key={`${leg.route_id}-${i}`} className="bg-route-panel rounded-md px-3 py-2">
-                <p className="font-medium">{leg.route_name}</p>
-                <p className="text-neutral-400">
-                  {leg.board_stop.stop_name} → {leg.alight_stop.stop_name}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
+          )}
+
+          {result && !result.found && (
+            <p className="rounded-md bg-route-panel px-3 py-2 text-sm text-neutral-300">
+              No direct or single-transfer route found between those stops.
+            </p>
+          )}
+
+          {result && result.found && (
+            <div className="flex flex-col gap-2 text-sm">
+              <p className="text-neutral-400">
+                {result.transfer_count === 0
+                  ? "Direct route"
+                  : `${result.transfer_count} transfer${result.transfer_count > 1 ? "s" : ""}`}
+                {" · "}
+                {(result.total_cost / 1000).toFixed(1)} km
+                {totalDurationS !== null && <> · ~{formatDuration(totalDurationS)}</>}
+              </p>
+              {result.legs.map((leg, i) => {
+                const isWalk = leg.route_id === "TRANSFER";
+                return (
+                  <div
+                    key={`${leg.route_id}-${i}`}
+                    className="flex items-start gap-2 rounded-md bg-route-panel px-3 py-2"
+                  >
+                    <span
+                      className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor: isWalk
+                          ? "#9CA3AF"
+                          : LEG_COLORS[i % LEG_COLORS.length],
+                      }}
+                      aria-hidden
+                    />
+                    <div>
+                      <p className="font-medium">{leg.route_name}</p>
+                      <p className="text-neutral-400">
+                        {leg.board_stop.stop_name} → {leg.alight_stop.stop_name}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {!result && !error && (
+            <p className="text-sm text-neutral-500">
+              Pick a starting stop and a destination, then hit Find route to see it on the map.
+            </p>
+          )}
+        </div>
       </aside>
 
-      <div className="flex-1">
+      <div className="min-h-[50vh] flex-1 md:min-h-0">
         <BusMap key="bus-map" result={result} />
       </div>
     </main>
   );
 }
+
+// Kept in sync with LEG_COLORS in components/BusMap.tsx so the legend in
+// the sidebar matches the polylines drawn on the map.
+const LEG_COLORS = ["#3DDC97", "#F2A93B", "#5DA9E9", "#E06C75"];

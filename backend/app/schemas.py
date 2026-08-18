@@ -67,7 +67,10 @@ class RouteLeg(BaseModel):
     route_name: str
     board_stop: StopOut
     alight_stop: StopOut
-    num_stops: int
+    # Count of merged ride segments (hops) on this leg, NOT physical stops.
+    # len(stops) == num_ride_segments + 1 always; use len(stops) for the
+    # physical stop count.
+    num_ride_segments: int
     stops: list[StopOut] = []  # every physical stop on this leg, in order, board→alight inclusive
     road_geometry: Optional[dict] = None
 

@@ -11,5 +11,32 @@ body {
   color: #e8ecef;
 }
 
-/* Leaflet's default marker icon paths break with bundlers; components/BusMap.tsx
-   fixes this by pointing at CDN-hosted icon images directly. */
+/* components/BusMap.tsx uses L.divIcon (plain HTML/CSS) for markers instead
+   of Leaflet's default image-based icons, which sidesteps the classic
+   "marker icon paths break with bundlers" issue entirely. */
+
+/* Leaflet's stock popup chrome is styled for a light page; restyle it to
+   match the app's dark theme instead of leaving a jarring white card. */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: #161d23;
+  color: #e8ecef;
+}
+
+.leaflet-popup-content-wrapper {
+  border: 1px solid #2a343b;
+  border-radius: 8px;
+}
+
+.leaflet-popup-content {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.leaflet-container a.leaflet-popup-close-button {
+  color: #9ca3af;
+}
+
+.leaflet-container a.leaflet-popup-close-button:hover {
+  color: #e8ecef;
+}

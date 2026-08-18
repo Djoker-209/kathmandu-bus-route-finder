@@ -69,7 +69,7 @@ def find_route(
         to_stop = StopOut.model_validate(queries.get_stop(db, seg.to_stop_id))
         if legs and legs[-1].route_id == seg_route_id:
             legs[-1].alight_stop = to_stop
-            legs[-1].num_stops += 1
+            legs[-1].num_ride_segments += 1
             legs[-1].stops.append(to_stop)
         else:
             from_stop = StopOut.model_validate(queries.get_stop(db, seg.from_stop_id))
@@ -79,7 +79,7 @@ def find_route(
                     route_name="Transfer (walk)" if seg.is_transfer else seg.route_id,
                     board_stop=from_stop,
                     alight_stop=to_stop,
-                    num_stops=1,
+                    num_ride_segments=1,
                     stops=[from_stop, to_stop],
                 )
             )

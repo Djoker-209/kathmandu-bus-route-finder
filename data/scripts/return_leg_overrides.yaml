@@ -1,4 +1,6 @@
 routes:
+  - route_id: R-NY-03
+    verdict: keep
   - route_id: R2276770
     verdict: drop_repeats
   - route_id: R2301358
